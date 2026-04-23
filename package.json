@@ -1,18 +1,18 @@
 {
   "name": "mischess",
-  "version": "1.0.0",
-  "description": "Mischess - High performance chess platform",
+  "version": "2.0.0",
+  "description": "Mischess - high-performance chess platform",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "nodemon server/index.js"
+    "dev": "nodemon server/index.js",
+    "db:migrate": "node server/db/migrate.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "20.x"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.3.0",
+    "argon2": "^0.41.1",
     "chess.js": "^1.0.0-beta.8",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
@@ -21,11 +21,12 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
   },
-  "keywords": ["chess", "multiplayer", "anticheat"],
+  "keywords": ["chess", "multiplayer", "anticheat", "stockfish"],
   "license": "MIT"
 }

@@ -3,15 +3,11 @@
 const WebSocket = require('ws');
 const url = require('url');
 const { verifyToken } = require('./auth');
-const { getDb } = require('./db');
-const {
-  games, enqueue, leaveQueue, getUserActiveGame,
-} = require('./gameManager');
+const { query, one } = require('./db/pool');
+const { games, enqueue, leaveQueue, getUserActiveGame } = require('./gameManager');
 
-// Per-user socket set (multi-tab support)
-const userSockets = new Map(); // userId -> Set<ws>
-// Track which game each socket is observing
-const socketState = new WeakMap(); // ws -> { userId, username, watchingGameId }
+const userSockets = new Map();
+const socketState = new WeakMap();
 
 function addSocket(userId, ws) {
   if (!userSockets.has(userId)) userSockets.set(userId, new Set());
@@ -26,9 +22,7 @@ function removeSocket(userId, ws) {
 }
 
 function send(ws, msg) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
-  }
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
 function broadcastToGame(game, msg) {
@@ -36,94 +30,70 @@ function broadcastToGame(game, msg) {
   for (const ws of game.spectators) send(ws, msg);
 }
 
-function broadcastToUser(userId, msg) {
-  const set = userSockets.get(userId);
-  if (!set) return;
-  for (const ws of set) send(ws, msg);
-}
-
 function initWebSocket(server) {
   const wss = new WebSocket.Server({ server, path: '/ws' });
 
-  wss.on('connection', (ws, req) => {
-    const query = url.parse(req.url, true).query;
+  wss.on('connection', async (ws, req) => {
+    const q = url.parse(req.url, true).query;
     let user = null;
-    if (query.token) {
-      const data = verifyToken(query.token);
+    if (q.token) {
+      const data = verifyToken(q.token);
       if (data) user = data;
     }
-    if (!user) {
-      send(ws, { type: 'error', error: 'Authentication required' });
-      ws.close();
-      return;
-    }
+    if (!user) { send(ws, { type: 'error', error: 'Authentication required' }); ws.close(); return; }
 
-    // Load fresh user data (ratings)
-    const db = getDb();
-    const dbUser = db.prepare(`
-      SELECT id, username, rating_bullet, rating_blitz, rating_rapid, rating_classical
-      FROM users WHERE id = ?
-    `).get(user.id);
-    if (!dbUser) {
-      send(ws, { type: 'error', error: 'User not found' });
-      ws.close();
-      return;
-    }
+    const dbUser = await one(
+      `SELECT id, username, is_flagged,
+              rating_bullet, rating_blitz, rating_rapid, rating_classical
+       FROM users WHERE id = $1`,
+      [user.id]
+    );
+    if (!dbUser) { send(ws, { type: 'error', error: 'User not found' }); ws.close(); return; }
 
-    const state = { userId: dbUser.id, username: dbUser.username, watchingGameId: null };
+    const state = {
+      userId: dbUser.id,
+      username: dbUser.username,
+      flagged: !!dbUser.is_flagged,
+      watchingGameId: null,
+    };
     socketState.set(ws, state);
     addSocket(dbUser.id, ws);
 
     send(ws, { type: 'connected', username: dbUser.username, userId: dbUser.id });
 
-    // Inform client if they have an active game — reconnect support
-    const activeGame = getUserActiveGame(dbUser.id);
-    if (activeGame) {
-      activeGame.sockets.add(ws);
-      state.watchingGameId = activeGame.id;
-      send(ws, { type: 'gameStart', game: activeGame.snapshot(), yourColor: activeGame.playerColor(dbUser.id) });
+    const active = getUserActiveGame(dbUser.id);
+    if (active) {
+      active.sockets.add(ws);
+      state.watchingGameId = active.id;
+      send(ws, { type: 'gameStart', game: active.snapshot(), yourColor: active.playerColor(dbUser.id) });
     }
 
     ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
-      handleMessage(ws, state, msg);
+      let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+      handleMessage(ws, state, msg, dbUser);
     });
 
     ws.on('close', () => {
       removeSocket(state.userId, ws);
-      // Remove from any queues
       leaveQueue(state.userId);
-      // Remove from game sockets
       if (state.watchingGameId) {
         const g = games.get(state.watchingGameId);
-        if (g) {
-          g.sockets.delete(ws);
-          g.spectators.delete(ws);
-        }
+        if (g) { g.sockets.delete(ws); g.spectators.delete(ws); }
       }
     });
-
     ws.on('error', () => {});
   });
 
-  // Periodic clock tick - broadcast clocks to all active games every 500ms
+  // Clock tick loop - 500ms. Also checks for timeout flags.
   setInterval(() => {
     for (const game of games.values()) {
       if (game.ended) continue;
-      if (game.chess.history().length < 2) continue;
-      // Send lightweight clock update
+      if (game.core.history().length < 2) continue;
       const clocks = game.currentClocks();
-      const payload = { type: 'clock', whiteTime: clocks.white, blackTime: clocks.black };
-      broadcastToGame(game, payload);
-
-      // Check for flag
+      broadcastToGame(game, { type: 'clock', whiteTime: clocks.white, blackTime: clocks.black });
       if (clocks.white === 0 || clocks.black === 0) {
-        // force tick to apply end
         game._tickClock();
-        if (game.ended) {
-          broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
-        }
+        if (game.ended) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
       }
     }
   }, 500);
@@ -131,40 +101,36 @@ function initWebSocket(server) {
   console.log('[ws] websocket server initialized on /ws');
 }
 
-function handleMessage(ws, state, msg) {
+async function handleMessage(ws, state, msg, dbUser) {
   switch (msg.type) {
     case 'ping':
       return send(ws, { type: 'pong', t: Date.now() });
 
     case 'seekGame': {
-      // Leave any existing queue
       leaveQueue(state.userId);
-      const { initialTime, increment, rated } = msg;
-      const it = clampInt(initialTime, 60, 10800);
-      const inc = clampInt(increment, 0, 60);
-      const r = rated !== false;
+      const it = clampInt(msg.initialTime, 60, 10800);
+      const inc = clampInt(msg.increment, 0, 60);
+      const r = msg.rated !== false;
 
-      const db = getDb();
-      const user = db.prepare(`
-        SELECT rating_bullet, rating_blitz, rating_rapid, rating_classical
-        FROM users WHERE id = ?
-      `).get(state.userId);
+      // Refresh user flagged status (may have changed mid-session)
+      const fresh = await one('SELECT is_flagged, rating_bullet, rating_blitz, rating_rapid, rating_classical FROM users WHERE id = $1', [state.userId]);
+      state.flagged = !!fresh.is_flagged;
       const cat = (it + 40 * inc < 180) ? 'rating_bullet'
         : (it + 40 * inc < 480) ? 'rating_blitz'
         : (it + 40 * inc < 1500) ? 'rating_rapid' : 'rating_classical';
-      const rating = user[cat];
+      const rating = fresh[cat];
 
-      const result = enqueue(ws, state.userId, state.username, rating, it, inc, r);
+      const result = enqueue(ws, {
+        userId: state.userId, username: state.username, rating, flagged: state.flagged,
+      }, it, inc, r);
       if (result.matched) {
         const game = result.game;
-        // Both sockets join game room
         game.sockets.add(result.whiteWs);
         game.sockets.add(result.blackWs);
-        const whiteState = socketState.get(result.whiteWs);
-        const blackState = socketState.get(result.blackWs);
-        if (whiteState) whiteState.watchingGameId = game.id;
-        if (blackState) blackState.watchingGameId = game.id;
-
+        const ws1 = socketState.get(result.whiteWs);
+        const ws2 = socketState.get(result.blackWs);
+        if (ws1) ws1.watchingGameId = game.id;
+        if (ws2) ws2.watchingGameId = game.id;
         send(result.whiteWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'white' });
         send(result.blackWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'black' });
       } else {
@@ -173,11 +139,9 @@ function handleMessage(ws, state, msg) {
       return;
     }
 
-    case 'cancelSeek': {
+    case 'cancelSeek':
       leaveQueue(state.userId);
-      send(ws, { type: 'queueCancelled' });
-      return;
-    }
+      return send(ws, { type: 'queueCancelled' });
 
     case 'move': {
       const game = games.get(state.watchingGameId || msg.gameId);
@@ -185,45 +149,37 @@ function handleMessage(ws, state, msg) {
       const res = game.tryMove(state.userId, msg.move);
       if (res.error) return send(ws, { type: 'moveError', error: res.error });
       broadcastToGame(game, { type: 'move', game: game.snapshot(), lastMove: res.move });
-      if (game.ended) {
-        broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
-      }
+      if (game.ended) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
       return;
     }
 
     case 'resign': {
       const game = games.get(state.watchingGameId || msg.gameId);
       if (!game) return;
-      const res = game.resign(state.userId);
-      if (res.resigned) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
+      if (game.resign(state.userId).resigned) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
       return;
     }
 
     case 'abort': {
       const game = games.get(state.watchingGameId || msg.gameId);
       if (!game) return;
-      const res = game.abort(state.userId);
-      if (res.aborted) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
+      if (game.abort(state.userId).aborted) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
       return;
     }
 
     case 'offerDraw': {
       const game = games.get(state.watchingGameId || msg.gameId);
       if (!game) return;
-      const res = game.offerDraw(state.userId);
-      if (res.accepted) {
-        broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
-      } else if (res.offered) {
-        broadcastToGame(game, { type: 'drawOffered', from: game.playerColor(state.userId) });
-      }
+      const r = game.offerDraw(state.userId);
+      if (r.accepted) broadcastToGame(game, { type: 'gameEnd', game: game.snapshot() });
+      else if (r.offered) broadcastToGame(game, { type: 'drawOffered', from: game.playerColor(state.userId) });
       return;
     }
 
     case 'declineDraw': {
       const game = games.get(state.watchingGameId || msg.gameId);
       if (!game) return;
-      const res = game.declineDraw(state.userId);
-      if (res.declined) broadcastToGame(game, { type: 'drawDeclined' });
+      if (game.declineDraw(state.userId).declined) broadcastToGame(game, { type: 'drawDeclined' });
       return;
     }
 
@@ -232,56 +188,41 @@ function handleMessage(ws, state, msg) {
       if (!game) return;
       const text = String(msg.text || '').slice(0, 200).trim();
       if (!text) return;
-      broadcastToGame(game, {
-        type: 'chat',
-        username: state.username,
-        text,
-        t: Date.now(),
-      });
+      broadcastToGame(game, { type: 'chat', username: state.username, text, t: Date.now() });
       return;
     }
 
     case 'spectate': {
       const game = games.get(msg.gameId);
       if (!game) return send(ws, { type: 'error', error: 'Game not found' });
-      // Leave previous
       if (state.watchingGameId) {
         const prev = games.get(state.watchingGameId);
-        if (prev) {
-          prev.sockets.delete(ws);
-          prev.spectators.delete(ws);
-        }
+        if (prev) { prev.sockets.delete(ws); prev.spectators.delete(ws); }
       }
       game.spectators.add(ws);
       state.watchingGameId = game.id;
-      send(ws, { type: 'gameStart', game: game.snapshot(), yourColor: null });
-      return;
+      return send(ws, { type: 'gameStart', game: game.snapshot(), yourColor: null });
     }
 
     case 'leaveSpectate': {
       if (state.watchingGameId) {
         const g = games.get(state.watchingGameId);
-        if (g) {
-          g.sockets.delete(ws);
-          g.spectators.delete(ws);
-        }
-        // Only clear if not a player
-        if (g && g.playerColor(state.userId) === null) {
-          state.watchingGameId = null;
-        }
+        if (g) { g.sockets.delete(ws); g.spectators.delete(ws); }
+        if (g && g.playerColor(state.userId) === null) state.watchingGameId = null;
       }
       return;
     }
 
     case 'focusEvent': {
-      // client reports blur/focus during game
       const game = games.get(state.watchingGameId || msg.gameId);
       if (!game) return;
       const color = game.playerColor(state.userId);
       if (!color) return;
-      if (msg.event === 'blur' || msg.event === 'focus') {
-        game.focusEvents[color].push({ type: msg.event, t: Date.now() });
-      }
+      if (msg.event !== 'blur' && msg.event !== 'focus') return;
+      query(
+        `INSERT INTO focus_events (game_id, user_id, event_type) VALUES ($1, $2, $3)`,
+        [game.id, state.userId, msg.event]
+      ).catch(() => {});
       return;
     }
 

@@ -1,15 +1,15 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Chess } = require('chess.js');
-const { getDb } = require('./db');
+const { GameCore } = require('./gameCore');
+const { query, one, tx } = require('./db/pool');
 const { eloUpdate } = require('./rating');
-const { evaluateGame } = require('./anticheat');
+const { enqueueAnalysis } = require('./anticheat');
 
-// In-memory maps
-const games = new Map(); // gameId -> Game
-const userGame = new Map(); // userId -> gameId (active)
-const queues = new Map(); // key -> [{ userId, username, rating, ws, joinedAt }]
+// In-memory maps — ephemeral, OK if they reset on deploy because only live games rely on them.
+const games = new Map();     // gameId -> GameSession
+const userGame = new Map();  // userId -> gameId
+const queues = new Map();    // queueKey -> [{ userId, username, rating, flagged, ws, joinedAt }]
 
 function gameId() {
   return crypto.randomBytes(5).toString('hex');
@@ -23,11 +23,18 @@ function categoryFor(initialSec, increment) {
   return 'classical';
 }
 
-function queueKey(initialSec, increment, rated) {
-  return `${initialSec}+${increment}:${rated ? 'r' : 'c'}`;
+/**
+ * Queue keys include flagged bucket to shadow-pool cheaters.
+ * Flagged users only match with other flagged users.
+ */
+function queueKey(initialSec, increment, rated, flaggedBucket) {
+  return `${initialSec}+${increment}:${rated ? 'r' : 'c'}:${flaggedBucket ? 'f' : 'c'}`;
 }
 
-class Game {
+/**
+ * GameSession composes GameCore with clocks, telemetry, lifecycle.
+ */
+class GameSession {
   constructor(opts) {
     this.id = opts.id;
     this.whiteId = opts.whiteId;
@@ -36,13 +43,13 @@ class Game {
     this.blackName = opts.blackName;
     this.whiteRating = opts.whiteRating;
     this.blackRating = opts.blackRating;
-    this.initialTime = opts.initialTime;  // seconds
-    this.increment = opts.increment;      // seconds
+    this.initialTime = opts.initialTime;
+    this.increment = opts.increment;
     this.category = opts.category;
     this.timeControl = `${Math.floor(opts.initialTime / 60)}+${opts.increment}`;
     this.rated = opts.rated !== false;
-    this.chess = new Chess();
-    this.whiteTime = opts.initialTime * 1000; // ms
+    this.core = new GameCore();
+    this.whiteTime = opts.initialTime * 1000;
     this.blackTime = opts.initialTime * 1000;
     this.lastMoveAt = Date.now();
     this.startedAt = Date.now();
@@ -51,14 +58,9 @@ class Game {
     this.winner = null;
     this.termination = null;
     this.moveTimes = { white: [], black: [] };
-    this.focusEvents = { white: [], black: [] };
-    this.drawOffer = null; // 'white' | 'black' | null
+    this.drawOffer = null;
     this.sockets = new Set();
     this.spectators = new Set();
-  }
-
-  turn() {
-    return this.chess.turn() === 'w' ? 'white' : 'black';
   }
 
   playerColor(userId) {
@@ -67,33 +69,29 @@ class Game {
     return null;
   }
 
-  // Apply clock, checking for flag
   _tickClock() {
     if (this.ended) return;
     const now = Date.now();
     const elapsed = now - this.lastMoveAt;
-    const side = this.turn();
+    const side = this.core.turn;
+    if (this.core.history().length < 2) {
+      this.lastMoveAt = now;
+      return;
+    }
     if (side === 'white') this.whiteTime -= elapsed;
     else this.blackTime -= elapsed;
     this.lastMoveAt = now;
-    if (this.whiteTime <= 0) {
-      this.whiteTime = 0;
-      this.endGame('0-1', 'black', 'timeout');
-    } else if (this.blackTime <= 0) {
-      this.blackTime = 0;
-      this.endGame('1-0', 'white', 'timeout');
-    }
+    if (this.whiteTime <= 0) { this.whiteTime = 0; this._endGame('0-1', 'black', 'timeout'); }
+    else if (this.blackTime <= 0) { this.blackTime = 0; this._endGame('1-0', 'white', 'timeout'); }
   }
 
   currentClocks() {
-    if (this.ended) return { white: this.whiteTime, black: this.blackTime };
-    if (this.chess.history().length < 2) {
-      // clock doesn't run until both players have moved once
+    if (this.ended || this.core.history().length < 2) {
       return { white: this.whiteTime, black: this.blackTime };
     }
     const now = Date.now();
     const elapsed = now - this.lastMoveAt;
-    const side = this.turn();
+    const side = this.core.turn;
     return {
       white: side === 'white' ? Math.max(0, this.whiteTime - elapsed) : this.whiteTime,
       black: side === 'black' ? Math.max(0, this.blackTime - elapsed) : this.blackTime,
@@ -104,61 +102,37 @@ class Game {
     if (this.ended) return { error: 'Game ended' };
     const color = this.playerColor(userId);
     if (!color) return { error: 'Not a player' };
-    if (color !== this.turn()) return { error: 'Not your turn' };
-
-    // Check flag before move
+    if (color !== this.core.turn) return { error: 'Not your turn' };
     this._tickClock();
     if (this.ended) return { error: 'Game ended on time' };
 
     const now = Date.now();
-    const thinkMs = this.chess.history().length >= 2 ? (now - this.lastMoveAt) : 0;
+    const thinkMs = this.core.history().length >= 2 ? (now - this.lastMoveAt) : 0;
 
-    let result;
-    try {
-      result = this.chess.move(move);
-    } catch (e) {
-      return { error: 'Illegal move' };
-    }
-    if (!result) return { error: 'Illegal move' };
+    const res = this.core.tryMove(move);
+    if (!res) return { error: 'Illegal move' };
 
-    // Apply increment
-    if (this.chess.history().length >= 2) {
+    if (this.core.history().length >= 2) {
       if (color === 'white') this.whiteTime += this.increment * 1000;
       else this.blackTime += this.increment * 1000;
     }
-
     this.moveTimes[color].push(thinkMs);
     this.lastMoveAt = now;
-    this.drawOffer = null; // move cancels any draw offer
+    this.drawOffer = null;
 
-    // Log move telemetry
-    try {
-      const db = getDb();
-      db.prepare(`
-        INSERT INTO move_telemetry (game_id, user_id, ply, think_ms, san, fen, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        this.id, userId, this.chess.history().length, thinkMs,
-        result.san, this.chess.fen(), now
-      );
-    } catch (e) { /* non-fatal */ }
+    // Log telemetry asynchronously (non-blocking)
+    const ply = this.core.history().length;
+    const fen = this.core.fen;
+    const san = res.san;
+    query(
+      `INSERT INTO move_telemetry (game_id, user_id, color, ply, think_ms, san, fen) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [this.id, userId, color, ply, thinkMs, san, fen]
+    ).catch(() => {});
 
-    // Check termination
-    if (this.chess.isCheckmate()) {
-      const winnerColor = color;
-      const resStr = winnerColor === 'white' ? '1-0' : '0-1';
-      this.endGame(resStr, winnerColor, 'checkmate');
-    } else if (this.chess.isStalemate()) {
-      this.endGame('1/2-1/2', null, 'stalemate');
-    } else if (this.chess.isThreefoldRepetition()) {
-      this.endGame('1/2-1/2', null, 'repetition');
-    } else if (this.chess.isInsufficientMaterial()) {
-      this.endGame('1/2-1/2', null, 'insufficient_material');
-    } else if (this.chess.isDraw()) {
-      this.endGame('1/2-1/2', null, 'fifty_move_rule');
-    }
+    const term = this.core.terminationInfo();
+    if (term.ended) this._endGame(term.result, term.winner, term.termination);
 
-    return { move: result, thinkMs };
+    return { move: res, thinkMs };
   }
 
   offerDraw(userId) {
@@ -167,8 +141,7 @@ class Game {
     if (this.ended) return { error: 'Game ended' };
     if (this.drawOffer === color) return { error: 'Already offered' };
     if (this.drawOffer && this.drawOffer !== color) {
-      // Accept existing offer
-      this.endGame('1/2-1/2', null, 'agreement');
+      this._endGame('1/2-1/2', null, 'agreement');
       return { accepted: true };
     }
     this.drawOffer = color;
@@ -189,21 +162,21 @@ class Game {
     const color = this.playerColor(userId);
     if (!color) return { error: 'Not a player' };
     if (this.ended) return { error: 'Game ended' };
-    const winnerColor = color === 'white' ? 'black' : 'white';
-    const resStr = winnerColor === 'white' ? '1-0' : '0-1';
-    this.endGame(resStr, winnerColor, 'resignation');
+    const winner = color === 'white' ? 'black' : 'white';
+    const result = winner === 'white' ? '1-0' : '0-1';
+    this._endGame(result, winner, 'resignation');
     return { resigned: true };
   }
 
   abort(userId) {
     const color = this.playerColor(userId);
     if (!color) return { error: 'Not a player' };
-    if (this.chess.history().length >= 2) return { error: 'Too late to abort' };
-    this.endGame(null, null, 'aborted');
+    if (this.core.history().length >= 2) return { error: 'Too late to abort' };
+    this._endGame(null, null, 'aborted');
     return { aborted: true };
   }
 
-  endGame(result, winner, termination) {
+  async _endGame(result, winner, termination) {
     if (this.ended) return;
     this.ended = true;
     this.result = result;
@@ -211,12 +184,9 @@ class Game {
     this.termination = termination;
     this.endedAt = Date.now();
 
-    // Remove user-active mapping
     if (this.whiteId) userGame.delete(this.whiteId);
     if (this.blackId) userGame.delete(this.blackId);
 
-    // Rating update + persist
-    const db = getDb();
     let whiteRatingAfter = this.whiteRating;
     let blackRatingAfter = this.blackRating;
 
@@ -226,81 +196,64 @@ class Game {
       else if (result === '0-1') whiteScore = 0;
       else whiteScore = 0.5;
 
-      const kW = this._kFactor(this.whiteId);
-      const kB = this._kFactor(this.blackId);
+      const kW = await this._kFactor(this.whiteId);
+      const kB = await this._kFactor(this.blackId);
       whiteRatingAfter = eloUpdate(this.whiteRating, this.blackRating, whiteScore, kW);
       blackRatingAfter = eloUpdate(this.blackRating, this.whiteRating, 1 - whiteScore, kB);
 
       const col = `rating_${this.category}`;
-      const updateUser = db.prepare(`
-        UPDATE users SET
-          ${col} = ?,
-          games_played = games_played + 1,
-          wins = wins + ?,
-          losses = losses + ?,
-          draws = draws + ?,
-          last_seen = ?
-        WHERE id = ?
-      `);
-      updateUser.run(whiteRatingAfter,
-        whiteScore === 1 ? 1 : 0, whiteScore === 0 ? 1 : 0, whiteScore === 0.5 ? 1 : 0,
-        Date.now(), this.whiteId);
-      updateUser.run(blackRatingAfter,
-        whiteScore === 0 ? 1 : 0, whiteScore === 1 ? 1 : 0, whiteScore === 0.5 ? 1 : 0,
-        Date.now(), this.blackId);
+      await tx(async (client) => {
+        await client.query(
+          `UPDATE users SET ${col} = $1, games_played = games_played + 1,
+             wins = wins + $2, losses = losses + $3, draws = draws + $4, last_seen = NOW()
+             WHERE id = $5`,
+          [whiteRatingAfter, whiteScore === 1 ? 1 : 0, whiteScore === 0 ? 1 : 0, whiteScore === 0.5 ? 1 : 0, this.whiteId]
+        );
+        await client.query(
+          `UPDATE users SET ${col} = $1, games_played = games_played + 1,
+             wins = wins + $2, losses = losses + $3, draws = draws + $4, last_seen = NOW()
+             WHERE id = $5`,
+          [blackRatingAfter, whiteScore === 0 ? 1 : 0, whiteScore === 1 ? 1 : 0, whiteScore === 0.5 ? 1 : 0, this.blackId]
+        );
+      }).catch(err => console.error('[game rating update]', err));
     }
 
-    // Save game
-    try {
-      db.prepare(`
-        INSERT INTO games (
-          id, white_id, black_id, white_name, black_name,
-          time_control, initial_time, increment, category, rated,
-          result, winner, termination, pgn, moves, final_fen,
-          white_rating_before, black_rating_before,
-          white_rating_after, black_rating_after,
-          started_at, ended_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+    // Persist game record
+    const endedAt = new Date();
+    await query(
+      `INSERT INTO games (
+         id, white_id, black_id, white_name, black_name,
+         time_control, initial_time, increment, category, rated,
+         result, winner, termination, pgn, moves, final_fen,
+         white_rating_before, black_rating_before, white_rating_after, black_rating_after,
+         started_at, ended_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22)`,
+      [
         this.id, this.whiteId, this.blackId, this.whiteName, this.blackName,
-        this.timeControl, this.initialTime, this.increment, this.category, this.rated ? 1 : 0,
-        this.result, this.winner, this.termination,
-        this.chess.pgn(), JSON.stringify(this.chess.history()), this.chess.fen(),
-        this.whiteRating, this.blackRating,
-        whiteRatingAfter, blackRatingAfter,
-        this.startedAt, this.endedAt
-      );
-    } catch (e) {
-      console.error('[game save]', e);
-    }
-
-    // Anti-cheat analysis (async)
-    setImmediate(() => {
-      try {
-        if (this.whiteId) evaluateGame(this.id, this.whiteId, this.moveTimes.white, this.focusEvents.white);
-        if (this.blackId) evaluateGame(this.id, this.blackId, this.moveTimes.black, this.focusEvents.black);
-      } catch (e) {
-        console.error('[anticheat]', e);
-      }
-    });
+        this.timeControl, this.initialTime, this.increment, this.category, this.rated,
+        this.result, this.winner, this.termination, this.core.pgn,
+        JSON.stringify(this.core.history()), this.core.fen,
+        this.whiteRating, this.blackRating, whiteRatingAfter, blackRatingAfter,
+        new Date(this.startedAt), endedAt,
+      ]
+    ).catch(err => console.error('[game save]', err));
 
     this.whiteRatingAfter = whiteRatingAfter;
     this.blackRatingAfter = blackRatingAfter;
 
-    // Clean up after 10 minutes (keep briefly for analysis/reconnect)
-    setTimeout(() => {
-      games.delete(this.id);
-    }, 10 * 60 * 1000);
+    // Kick the anti-cheat analysis queue
+    if (this.rated) enqueueAnalysis(this.id);
+
+    // Clean up from memory after 10 min (reconnect + spectate window)
+    setTimeout(() => games.delete(this.id), 10 * 60 * 1000);
   }
 
-  _kFactor(userId) {
-    const db = getDb();
-    const row = db.prepare('SELECT games_played FROM users WHERE id = ?').get(userId);
+  async _kFactor(userId) {
+    const row = await one('SELECT games_played, rating_bullet, rating_blitz, rating_rapid, rating_classical FROM users WHERE id = $1', [userId]);
     if (!row) return 32;
     if (row.games_played < 30) return 40;
-    const ratingCol = `rating_${this.category}`;
-    const r = db.prepare(`SELECT ${ratingCol} AS r FROM users WHERE id = ?`).get(userId);
-    if (r && r.r >= 2400) return 16;
+    const r = row[`rating_${this.category}`];
+    if (r >= 2400) return 16;
     return 20;
   }
 
@@ -317,10 +270,10 @@ class Game {
       category: this.category,
       timeControl: this.timeControl,
       rated: this.rated,
-      fen: this.chess.fen(),
-      pgn: this.chess.pgn(),
-      moves: this.chess.history({ verbose: false }),
-      turn: this.turn(),
+      fen: this.core.fen,
+      pgn: this.core.pgn,
+      moves: this.core.history(),
+      turn: this.core.turn,
       whiteTime: clocks.white,
       blackTime: clocks.black,
       drawOffer: this.drawOffer,
@@ -333,34 +286,27 @@ class Game {
 }
 
 /**
- * Add a user to the matchmaking queue; if someone is there, create a game.
+ * Matchmaking entry point. Shadow-pools flagged users.
  */
-function enqueue(ws, userId, username, rating, initialTime, increment, rated = true) {
-  const key = queueKey(initialTime, increment, rated);
+function enqueue(ws, { userId, username, rating, flagged }, initialTime, increment, rated = true) {
+  const key = queueKey(initialTime, increment, rated, flagged);
   if (!queues.has(key)) queues.set(key, []);
   const q = queues.get(key);
 
-  // Remove existing entry for this user
+  // Remove any existing entry for this user across all queues
   for (const list of queues.values()) {
     const idx = list.findIndex(e => e.userId === userId);
     if (idx >= 0) list.splice(idx, 1);
   }
 
-  // Find a match — prefer closest rating
   if (q.length > 0) {
-    // Pick the opponent with closest rating (simple approach)
     q.sort((a, b) => Math.abs(a.rating - rating) - Math.abs(b.rating - rating));
     const opp = q.shift();
-    // Randomize colors
     const whiteFirst = Math.random() < 0.5;
-    const white = whiteFirst
-      ? { userId, username, rating, ws }
-      : opp;
-    const black = whiteFirst
-      ? opp
-      : { userId, username, rating, ws };
+    const white = whiteFirst ? { userId, username, rating, ws } : opp;
+    const black = whiteFirst ? opp : { userId, username, rating, ws };
 
-    const game = new Game({
+    const session = new GameSession({
       id: gameId(),
       whiteId: white.userId,
       blackId: black.userId,
@@ -368,18 +314,17 @@ function enqueue(ws, userId, username, rating, initialTime, increment, rated = t
       blackName: black.username,
       whiteRating: white.rating,
       blackRating: black.rating,
-      initialTime,
-      increment,
+      initialTime, increment,
       category: categoryFor(initialTime, increment),
       rated,
     });
-    games.set(game.id, game);
-    userGame.set(white.userId, game.id);
-    userGame.set(black.userId, game.id);
-    return { matched: true, game, whiteWs: white.ws, blackWs: black.ws };
+    games.set(session.id, session);
+    userGame.set(white.userId, session.id);
+    userGame.set(black.userId, session.id);
+    return { matched: true, game: session, whiteWs: white.ws, blackWs: black.ws };
   }
 
-  q.push({ userId, username, rating, ws, joinedAt: Date.now() });
+  q.push({ userId, username, rating, flagged, ws, joinedAt: Date.now() });
   return { matched: false, queued: key };
 }
 
@@ -396,37 +341,8 @@ function getUserActiveGame(userId) {
   return games.get(gid) || null;
 }
 
-function challengeUser(challenger, challenged, initialTime, increment, rated) {
-  // Friend challenge — direct game creation
-  const whiteFirst = Math.random() < 0.5;
-  const white = whiteFirst ? challenger : challenged;
-  const black = whiteFirst ? challenged : challenger;
-  const game = new Game({
-    id: gameId(),
-    whiteId: white.userId,
-    blackId: black.userId,
-    whiteName: white.username,
-    blackName: black.username,
-    whiteRating: white.rating,
-    blackRating: black.rating,
-    initialTime,
-    increment,
-    category: categoryFor(initialTime, increment),
-    rated,
-  });
-  games.set(game.id, game);
-  userGame.set(white.userId, game.id);
-  userGame.set(black.userId, game.id);
-  return game;
-}
-
 module.exports = {
-  games,
-  userGame,
-  queues,
-  enqueue,
-  leaveQueue,
-  getUserActiveGame,
-  Game,
-  challengeUser,
+  games, userGame, queues,
+  enqueue, leaveQueue, getUserActiveGame,
+  GameSession,
 };

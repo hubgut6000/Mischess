@@ -1,5 +1,7 @@
 import { Board } from './board.js';
 import { findBestMove } from './ai.js';
+import { sound, installClickSounds } from './sound.js';
+import { StockfishEngine } from './stockfish.js';
 
 // ---------- State ----------
 const state = {
@@ -12,7 +14,25 @@ const state = {
   board: null,
   playerColor: null,
   focusBlurListener: null,
+  stockfish: null,     // persistent engine instance
+  settings: loadSettings(),
+  lastFen: null,       // to detect move type (capture/check) for sound
 };
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem('mischess:settings');
+    if (raw) return { ...defaultSettings(), ...JSON.parse(raw) };
+  } catch {}
+  return defaultSettings();
+}
+function defaultSettings() {
+  return { sound: true, moveSound: true, boardTheme: 'classic' };
+}
+function saveSettings() {
+  try { localStorage.setItem('mischess:settings', JSON.stringify(state.settings)); } catch {}
+  sound.setEnabled(state.settings.sound);
+}
 
 // ---------- Utils ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -234,6 +254,7 @@ function onWsMessage(ev) {
       onChatMessage(msg);
       break;
     case 'moveError':
+      sound.error();
       toast(msg.error, 'error');
       if (state.board && state.game) state.board.setPosition(state.game.fen);
       break;
@@ -459,6 +480,7 @@ function renderPlayPicker() {
 async function startSeek(initialTime, increment, rated) {
   await ensureWs();
   sendWs({ type: 'seekGame', initialTime, increment, rated });
+  sound.startSearch();
   const status = $('#queue-status');
   if (status) {
     status.innerHTML = '';
@@ -473,10 +495,12 @@ async function startSeek(initialTime, increment, rated) {
 
 function cancelSeek() {
   sendWs({ type: 'cancelSeek' });
+  sound.stopSearch();
 }
 
 function onQueued() { /* already shown */ }
 function onQueueCancelled() {
+  sound.stopSearch();
   const status = $('#queue-status');
   if (status) status.innerHTML = '';
   toast('Search cancelled');
@@ -486,29 +510,42 @@ function onQueueCancelled() {
 route('/play/ai', async () => {
   const view = h('div', { class: 'play-layout' });
   view.appendChild(h('h1', {}, 'Play vs Computer'));
-  view.appendChild(h('p', {}, 'Offline practice against the built-in engine. Ratings not affected.'));
+  view.appendChild(h('p', {},
+    'Practice against Stockfish. Pick a target Elo or a classic skill level. ',
+    'Ratings are not affected. Engine runs in a background thread, UI stays smooth.'));
 
-  let level = 3;
+  // Elo presets — map to Stockfish Skill Level and search depth
+  const PRESETS = [
+    { label: 'Beginner',     elo: 800,  skill: 0,  depth: 3  },
+    { label: 'Casual',       elo: 1200, skill: 3,  depth: 4  },
+    { label: 'Club player',  elo: 1500, skill: 6,  depth: 6  },
+    { label: 'Intermediate', elo: 1800, skill: 10, depth: 8  },
+    { label: 'Advanced',     elo: 2100, skill: 14, depth: 10 },
+    { label: 'Expert',       elo: 2400, skill: 17, depth: 12 },
+    { label: 'Master',       elo: 2700, skill: 20, depth: 16 },
+  ];
+  let selected = PRESETS[2];
   let color = 'white';
-  const levelGrid = h('div', { class: 'time-control-grid' });
-  for (let i = 1; i <= 8; i++) {
-    const c = h('div', { class: 'tc-card' + (i === level ? ' selected' : ''), onclick: () => {
-      level = i;
-      $$('.tc-card', levelGrid).forEach(x => x.classList.remove('selected'));
+
+  const grid = h('div', { class: 'time-control-grid' });
+  PRESETS.forEach(p => {
+    const c = h('div', { class: 'tc-card' + (p === selected ? ' selected' : ''), onclick: () => {
+      selected = p;
+      $$('.tc-card', grid).forEach(x => x.classList.remove('selected'));
       c.classList.add('selected');
     }},
-      h('div', { class: 'tc-time' }, `Level ${i}`),
-      h('div', { class: 'tc-cat' }, i <= 2 ? 'Beginner' : i <= 4 ? 'Intermediate' : i <= 6 ? 'Advanced' : 'Expert'),
+      h('div', { class: 'tc-time' }, `${p.elo}`),
+      h('div', { class: 'tc-cat' }, p.label),
     );
-    levelGrid.appendChild(c);
-  }
-  view.appendChild(levelGrid);
+    grid.appendChild(c);
+  });
+  view.appendChild(grid);
 
   const colorRow = h('div', { class: 'play-controls' });
-  ['white', 'random', 'black'].forEach(c => {
-    const btn = h('button', { class: 'btn btn-ghost' + (c === color ? ' btn-primary' : ''),
-      onclick: () => { color = c; $$('button', colorRow).forEach((b,i) => b.classList.toggle('btn-primary', ['white','random','black'][i] === c)); }
-    }, c[0].toUpperCase() + c.slice(1));
+  ['white', 'random', 'black'].forEach(cName => {
+    const btn = h('button', { class: 'btn btn-ghost' + (cName === color ? ' btn-primary' : ''),
+      onclick: () => { color = cName; $$('button', colorRow).forEach((b,i) => b.classList.toggle('btn-primary', ['white','random','black'][i] === cName)); }
+    }, cName[0].toUpperCase() + cName.slice(1));
     colorRow.appendChild(btn);
   });
   view.appendChild(colorRow);
@@ -516,19 +553,37 @@ route('/play/ai', async () => {
   view.appendChild(h('div', { class: 'play-controls' },
     h('button', { class: 'btn btn-primary', onclick: () => {
       const finalColor = color === 'random' ? (Math.random() < 0.5 ? 'white' : 'black') : color;
-      startAiGame(level, finalColor);
+      startAiGame(selected, finalColor);
     }}, 'Start game'),
   ));
+
+  view.appendChild(h('p', { style: 'color:var(--text-dim);font-size:0.85rem;text-align:center;margin-top:20px' },
+    'Powered by Stockfish 10+ WASM. First move may take a moment while the engine loads.'));
+
   return view;
 });
 
-function startAiGame(level, playerColor) {
-  // Set up local game
+async function startAiGame(preset, playerColor) {
+  // Initialize Stockfish engine (persistent across games if possible)
+  if (!state.stockfish) {
+    state.stockfish = new StockfishEngine();
+    toast('Loading Stockfish engine...', 'info');
+  }
+  try {
+    await state.stockfish.init();
+  } catch (e) {
+    toast('Engine failed to load, using fallback AI', 'error');
+  }
+  state.stockfish.newGame();
+  state.stockfish.setSkillLevel(preset.skill);
+  state.stockfish.setElo(preset.elo);
+
   const aiGame = {
-    level,
+    preset,
     playerColor,
     chess: new window.Chess(),
     history: [],
+    thinking: false,
   };
   renderAiGameView(aiGame);
 }
@@ -541,16 +596,17 @@ function renderAiGameView(aiGame) {
 
   const oppStrip = h('div', { class: 'player-strip' },
     h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, `Computer (Level ${aiGame.level})`),
+      h('span', { class: 'name' }, `Stockfish (${aiGame.preset.label})`),
+      h('span', { class: 'rating' }, `${aiGame.preset.elo}`),
     ),
-    h('div', { class: 'clock' }, '--:--'),
+    h('div', { class: 'clock', id: 'ai-thinking' }, 'ready'),
   );
   const meStrip = h('div', { class: 'player-strip' },
     h('div', { class: 'player-info' },
       h('span', { class: 'name' }, state.user ? state.user.username : 'You'),
       state.user ? h('span', { class: 'rating' }, `${state.user.rating_blitz}`) : null,
     ),
-    h('div', { class: 'clock' }, '--:--'),
+    h('div', { class: 'clock' }, '--'),
   );
   boardCol.appendChild(oppStrip);
   const boardEl = h('div');
@@ -564,9 +620,8 @@ function renderAiGameView(aiGame) {
       if (confirm('Resign?')) endAiGame(aiGame, aiGame.playerColor === 'white' ? '0-1' : '1-0', 'resignation');
     }}, 'Resign'),
     h('button', { class: 'btn btn-ghost btn-sm', onclick: () => {
-      // Undo two plies (your + AI)
+      if (aiGame.thinking) return toast('Wait for Stockfish to finish', 'error');
       if (aiGame.chess.isGameOver()) return;
-      // Our client chess doesn't have undo; rebuild from history
       if (aiGame.history.length < 2) return;
       const target = aiGame.history.slice(0, -2);
       aiGame.chess = new window.Chess();
@@ -575,7 +630,7 @@ function renderAiGameView(aiGame) {
       state.board.setPosition(aiGame.chess.fen());
       renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     }}, 'Undo'),
-    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => { navigate('#/play/ai'); }}, 'New'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => navigate('#/play/ai') }, 'New'),
   );
   sideCol.appendChild(moveList);
   sideCol.appendChild(actions);
@@ -587,15 +642,23 @@ function renderAiGameView(aiGame) {
   const board = new Board(boardEl, {
     orientation: aiGame.playerColor,
     onMove: (move) => {
+      if (aiGame.thinking) return false;
       const res = aiGame.chess.move(move);
       if (!res) return false;
       aiGame.history.push(res.san);
+      // Play move sound
+      if (state.settings.moveSound) {
+        if (res.captured) sound.capture();
+        else sound.move();
+        if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
+      }
       board.setLastMove(res.from, res.to);
       board.setPosition(aiGame.chess.fen());
       renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
       checkAiGameEnd(aiGame);
       if (!aiGame.chess.isGameOver()) {
-        setTimeout(() => makeAiMove(aiGame, board, moveList), 300);
+        // Async AI move — UI stays fluid
+        requestAiMove(aiGame, board, moveList);
       }
     },
   });
@@ -603,30 +666,64 @@ function renderAiGameView(aiGame) {
   board.setPlayerColor(aiGame.playerColor);
   board.setPosition(aiGame.chess.fen());
 
-  // If player is black, AI moves first
+  // If player is black, Stockfish opens
   if (aiGame.playerColor === 'black') {
-    setTimeout(() => makeAiMove(aiGame, board, moveList), 400);
+    requestAiMove(aiGame, board, moveList);
   }
 }
 
-function makeAiMove(aiGame, board, moveList) {
+async function requestAiMove(aiGame, board, moveList) {
   if (aiGame.chess.isGameOver()) return;
-  const move = findBestMove(aiGame.chess.fen(), aiGame.level);
-  if (!move) { checkAiGameEnd(aiGame); return; }
-  const res = aiGame.chess.move(move);
-  if (!res) { checkAiGameEnd(aiGame); return; }
-  aiGame.history.push(res.san);
-  board.setPosition(aiGame.chess.fen());
-  board.setLastMove(res.from, res.to);
-  renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
-  checkAiGameEnd(aiGame);
+  aiGame.thinking = true;
+  const ind = $('#ai-thinking');
+  if (ind) { ind.textContent = 'thinking...'; ind.classList.add('active'); }
+
+  try {
+    const engine = state.stockfish;
+    const moveUci = await engine.getBestMove(aiGame.chess.fen(), {
+      depth: aiGame.preset.depth,
+      movetime: Math.min(3000, aiGame.preset.depth * 200),
+    });
+
+    if (!moveUci) {
+      aiGame.thinking = false;
+      if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
+      return;
+    }
+
+    // Convert UCI (e.g. e2e4 or e7e8q) to move object
+    const from = moveUci.slice(0, 2);
+    const to = moveUci.slice(2, 4);
+    const promotion = moveUci.length >= 5 ? moveUci[4] : undefined;
+    const res = aiGame.chess.move({ from, to, promotion });
+    if (!res) {
+      aiGame.thinking = false;
+      if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
+      return;
+    }
+    aiGame.history.push(res.san);
+    if (state.settings.moveSound) {
+      if (res.captured) sound.capture();
+      else sound.move();
+      if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
+    }
+    board.setPosition(aiGame.chess.fen());
+    board.setLastMove(res.from, res.to);
+    renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
+    checkAiGameEnd(aiGame);
+  } catch (e) {
+    console.error(e);
+    toast('Engine error', 'error');
+  } finally {
+    aiGame.thinking = false;
+    if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
+  }
 }
 
 function checkAiGameEnd(aiGame) {
   if (!aiGame.chess.isGameOver()) return;
   let result = '1/2-1/2', termination = 'draw';
   if (aiGame.chess.isCheckmate()) {
-    // The side to move has been mated
     const loser = aiGame.chess.turn();
     result = loser === 'w' ? '0-1' : '1-0';
     termination = 'checkmate';
@@ -637,6 +734,14 @@ function checkAiGameEnd(aiGame) {
 
 function endAiGame(aiGame, result, termination) {
   const msg = result === '1-0' ? 'White wins' : result === '0-1' ? 'Black wins' : 'Draw';
+  // Play victory/loss sound
+  const youWon =
+    (aiGame.playerColor === 'white' && result === '1-0') ||
+    (aiGame.playerColor === 'black' && result === '0-1');
+  if (state.settings.sound) {
+    if (youWon) sound.victory();
+    else sound.gameEnd();
+  }
   showGameEndModal(`${msg} — ${termination}`, () => navigate('#/play/ai'));
 }
 
@@ -1310,15 +1415,18 @@ function updateClockDisplays() {
 }
 
 function onGameStart(game, yourColor) {
+  sound.stopSearch();
+  sound.matchFound();
   state.game = game;
   state.playerColor = yourColor;
+  state.lastFen = game.fen;
   navigate('#/game/' + game.id);
   // render happens via hashchange
   setTimeout(() => renderRoute(), 50);
 }
 
 function onGameUpdate(game, lastMove) {
-  const wasStarted = !!state.game;
+  const prevMoveCount = state.game ? state.game.moves.length : 0;
   state.game = game;
   if (state.board) {
     state.board.setPosition(game.fen);
@@ -1327,6 +1435,22 @@ function onGameUpdate(game, lastMove) {
   const movesEl = $('.move-list');
   if (movesEl) renderMoveList(movesEl, game.fen, game.moves);
   updateClockDisplays();
+
+  // Play appropriate sound based on move type
+  if (state.settings.moveSound && game.moves.length > prevMoveCount && lastMove) {
+    // Detect check by probing the SAN notation in moves list
+    const lastSan = game.moves[game.moves.length - 1] || '';
+    if (lastSan.includes('#')) {
+      sound.gameEnd();
+    } else if (lastSan.includes('+')) {
+      sound.check();
+    } else if (lastMove.captured || lastSan.includes('x')) {
+      sound.capture();
+    } else {
+      sound.move();
+    }
+  }
+  state.lastFen = game.fen;
 }
 
 function onClockTick(whiteTime, blackTime) {
@@ -1371,6 +1495,14 @@ function onGameEnd(game) {
   else if (game.termination === 'aborted') msg = 'Game aborted';
   else msg = `Draw - ${game.termination}`;
 
+  // Play victory/defeat/draw sound
+  if (state.playerColor && state.settings.sound) {
+    if (game.winner === state.playerColor) sound.victory();
+    else sound.gameEnd();
+  } else if (state.settings.sound) {
+    sound.gameEnd();
+  }
+
   // Show rating change if available
   if (game.whiteRatingAfter && state.user) {
     const mine = state.playerColor === 'white' ? 'white' : 'black';
@@ -1394,6 +1526,8 @@ function onChatMessage(msg) {
     h('span', { class: 'txt' }, msg.text),
   ));
   container.scrollTop = container.scrollHeight;
+  // Only play notification for messages from others
+  if (state.user && msg.username !== state.user.username) sound.notify();
 }
 
 function showGameEndModal(message, onClose) {
@@ -1421,17 +1555,78 @@ function cleanupGame() {
   }
 }
 
+// SETTINGS
+route('/settings', async () => {
+  const view = h('div', { style: 'max-width:560px;margin:0 auto' });
+  view.appendChild(h('h1', {}, 'Settings'));
+
+  const section = (title, child) => h('div', { class: 'feature-card', style: 'margin-bottom:16px' },
+    h('h3', {}, title), child);
+
+  const toggleRow = (label, key, description) => {
+    const row = h('label', {
+      style: 'display:flex;justify-content:space-between;align-items:center;padding:8px 0;cursor:pointer',
+    },
+      h('div', {},
+        h('div', { style: 'font-weight:600' }, label),
+        description ? h('div', { style: 'font-size:0.85rem;color:var(--text-dim)' }, description) : null,
+      ),
+      h('input', { type: 'checkbox', checked: state.settings[key] ? '' : null, onchange: (e) => {
+        state.settings[key] = e.target.checked;
+        saveSettings();
+        if (key === 'sound' && e.target.checked) sound.click();
+      }}),
+    );
+    return row;
+  };
+
+  view.appendChild(section('Audio',
+    h('div', {},
+      toggleRow('All sounds', 'sound', 'Master toggle for every sound effect'),
+      toggleRow('Move sounds', 'moveSound', 'Piece movement, capture, check, and checkmate cues'),
+      h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' },
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.click() }, 'Test click'),
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.move() }, 'Test move'),
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.capture() }, 'Test capture'),
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.check() }, 'Test check'),
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.matchFound() }, 'Test match found'),
+        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.victory() }, 'Test victory'),
+      ),
+    ),
+  ));
+
+  view.appendChild(section('Account',
+    state.user
+      ? h('div', {},
+          h('p', {}, `Signed in as `, h('strong', {}, state.user.username)),
+          h('button', { class: 'btn btn-danger btn-sm', onclick: logout }, 'Sign out'),
+        )
+      : h('p', {}, 'Not signed in. ',
+          h('a', { href: '#/login', 'data-link': '' }, 'Sign in'), ' or ',
+          h('a', { href: '#/register', 'data-link': '' }, 'create an account'), '.'),
+  ));
+
+  view.appendChild(section('About this build',
+    h('div', {},
+      h('p', { style: 'margin:0;font-size:0.9rem;color:var(--text-soft)' },
+        'Mischess v2 - vanilla JS frontend, Node.js + PostgreSQL backend, Stockfish engine for both play-vs-AI and anti-cheat analysis.'),
+    ),
+  ));
+
+  return view;
+});
+
 // ABOUT
 route('/about', async () => {
   const view = h('div', { style: 'max-width:720px;margin:0 auto' });
   view.appendChild(h('h1', {}, 'About Mischess'));
-  view.appendChild(h('p', {}, 'Mischess is a fast, free, fair chess platform built for people who take the game seriously. It runs on a single Node.js process with WebSockets for real-time transport and SQLite with WAL journaling for durable storage. No ads, no tracking, no paywalls.'));
+  view.appendChild(h('p', {}, 'Mischess is a fast, free, fair chess platform built for people who take the game seriously. Real-time multiplayer over WebSockets. PostgreSQL for durable storage. Stockfish for both AI opponents and post-game cheat analysis. No ads, no tracking, no paywalls.'));
   view.appendChild(h('h3', {}, 'Time controls'));
-  view.appendChild(h('p', {}, 'Bullet (<3 min est.), Blitz (3–8 min), Rapid (8–25 min), Classical (25+ min). Each category has its own Elo rating.'));
+  view.appendChild(h('p', {}, 'Bullet (<3 min est.), Blitz (3-8 min), Rapid (8-25 min), Classical (25+ min). Each category has its own Elo rating.'));
   view.appendChild(h('h3', {}, 'Custom modes'));
   view.appendChild(h('p', {}, 'Chaos 960, Horde, Berserk Blitz, King of the Hill, Three-check, and Atomic Lite for when you want something different from standard play.'));
   view.appendChild(h('h3', {}, 'Fair play'));
-  view.appendChild(h('p', {}, 'Every game is analyzed for engine-assistance signals: move-time variance, instant-move ratios, tab-switch patterns, and more. Flagged accounts are auto-excluded from leaderboards and reviewed.'));
+  view.appendChild(h('p', {}, 'Every rated game is analyzed by Stockfish to compute centipawn loss and accuracy. Flagged accounts are shadow-pooled: they still match and play, but only against other flagged accounts.'));
   return view;
 });
 
@@ -1439,11 +1634,17 @@ route('/about', async () => {
 route('/fairplay', async () => {
   const view = h('div', { style: 'max-width:720px;margin:0 auto' });
   view.appendChild(h('h1', {}, 'Fair Play'));
-  view.appendChild(h('p', {}, 'Mischess uses a multi-layer heuristic anti-cheat system that runs continuously during and after every rated game.'));
-  view.appendChild(h('h3', {}, 'What we measure'));
-  view.appendChild(h('p', {}, 'Move-time variance and coefficient of variation — engines produce unnaturally uniform timings. Instant-move ratio on complex positions. Tab-switch and focus-loss events. Account clustering by IP. Post-game statistical analysis against known engine output patterns.'));
-  view.appendChild(h('h3', {}, 'What happens when you\'re flagged'));
-  view.appendChild(h('p', {}, 'Accounts above a severity threshold are auto-excluded from leaderboards. Above a higher threshold, the account is hidden from matchmaking pending review. False positives get resolved manually — we err on the side of caution.'));
+  view.appendChild(h('p', {}, 'Mischess runs a multi-layer anti-cheat system designed to catch engine assistance without punishing honest players.'));
+
+  view.appendChild(h('h3', {}, 'Accuracy Pulse'));
+  view.appendChild(h('p', {}, 'After every rated game, Stockfish evaluates each of your moves against its own best move. We compute Average Centipawn Loss (ACPL) and move-by-move accuracy, then store the last 6 games as a rolling average. Consistent engine-level play pushes both metrics into unreachable territory for humans — and triggers the flag.'));
+
+  view.appendChild(h('h3', {}, 'Secondary signals'));
+  view.appendChild(h('p', {}, 'Move-time variance (engines produce unnaturally uniform timings), instant-move ratio on complex positions, tab-switch and focus-loss events during rated games, and IP clustering across accounts. These alone are weak evidence; combined with ACPL they strengthen the signal.'));
+
+  view.appendChild(h('h3', {}, 'Shadow-pool matchmaking'));
+  view.appendChild(h('p', {}, 'When an account is flagged, nothing visible changes for that user. They still queue, still get matched, still see ratings change — but they only ever match against other flagged accounts. Cheaters play each other; honest players are untouched. No public shame, no appeals circus, no one-shot mistakes.'));
+
   view.appendChild(h('h3', {}, 'How to stay clean'));
   view.appendChild(h('p', {}, 'Play your own moves. Don\'t switch tabs during rated games. If you use analysis tools, use them outside of games, not during.'));
   return view;
@@ -1458,6 +1659,8 @@ function renderNotFound() {
 // ---------- Boot ----------
 (async function boot() {
   await checkAuth();
+  installClickSounds(document);
+  sound.setEnabled(state.settings.sound);
   if (!location.hash) location.hash = '#/';
   if (state.user) ensureWs().catch(() => {});
   renderRoute();

@@ -1,19 +1,18 @@
 'use strict';
 
 const express = require('express');
-const { getDb } = require('../db');
+const { many, one } = require('../db/pool');
 const { games } = require('../gameManager');
 
 const router = express.Router();
 
-router.get('/recent', (req, res) => {
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT id, white_name, black_name, category, time_control, result, winner, termination, ended_at
-    FROM games
-    WHERE ended_at IS NOT NULL
-    ORDER BY ended_at DESC LIMIT 30
-  `).all();
+router.get('/recent', async (req, res) => {
+  const rows = await many(
+    `SELECT id, white_name, black_name, category, time_control, result, winner, termination, ended_at,
+            white_acpl, black_acpl, white_accuracy, black_accuracy
+     FROM games WHERE ended_at IS NOT NULL
+     ORDER BY ended_at DESC LIMIT 30`
+  );
   res.json({ games: rows });
 });
 
@@ -29,14 +28,14 @@ router.get('/live', (req, res) => {
         blackRating: g.blackRating,
         category: g.category,
         timeControl: g.timeControl,
-        moves: g.chess.history().length,
+        moves: g.core.history().length,
       });
     }
   }
   res.json({ games: live.slice(0, 30) });
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   const live = games.get(req.params.id);
   if (live) {
     return res.json({
@@ -49,18 +48,16 @@ router.get('/:id', (req, res) => {
         blackRating: live.blackRating,
         timeControl: live.timeControl,
         category: live.category,
-        fen: live.chess.fen(),
-        pgn: live.chess.pgn(),
-        moves: live.chess.history(),
+        fen: live.core.fen,
+        pgn: live.core.pgn,
+        moves: live.core.history(),
         ended: live.ended,
         result: live.result,
         winner: live.winner,
       }
     });
   }
-
-  const db = getDb();
-  const game = db.prepare('SELECT * FROM games WHERE id = ?').get(req.params.id);
+  const game = await one('SELECT * FROM games WHERE id = $1', [req.params.id]);
   if (!game) return res.status(404).json({ error: 'Game not found' });
   res.json({ live: false, game });
 });

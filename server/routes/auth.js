@@ -1,10 +1,9 @@
 'use strict';
 
 const express = require('express');
-const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
-const { getDb } = require('../db');
-const { signToken, authMiddleware } = require('../auth');
+const { query, one } = require('../db/pool');
+const { hashPassword, verifyPassword, signToken, authMiddleware } = require('../auth');
 
 const router = express.Router();
 
@@ -37,38 +36,29 @@ router.post('/register', authLimiter, async (req, res) => {
     if (email && !EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'Invalid email' });
     }
-    if (!password || password.length < 6 || password.length > 100) {
-      return res.status(400).json({ error: 'Password must be 6-100 chars' });
+    if (!password || password.length < 6 || password.length > 128) {
+      return res.status(400).json({ error: 'Password must be 6-128 chars' });
     }
 
-    const db = getDb();
-    const existing = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').get(username);
+    const existing = await one('SELECT id FROM users WHERE username_lower = $1', [username.toLowerCase()]);
     if (existing) return res.status(409).json({ error: 'Username already taken' });
     if (email) {
-      const existingEmail = db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE').get(email);
+      const existingEmail = await one('SELECT id FROM users WHERE email_lower = $1', [email.toLowerCase()]);
       if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
     }
 
-    const hash = await bcrypt.hash(password, 10);
-    const now = Date.now();
-    const result = db.prepare(`
-      INSERT INTO users (username, email, password_hash, created_at, last_seen)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(username, email || null, hash, now, now);
+    const hash = await hashPassword(password);
+    const row = await one(
+      `INSERT INTO users (username, username_lower, email, email_lower, password_hash)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, username, email, rating_bullet, rating_blitz, rating_rapid, rating_classical,
+                 games_played, wins, losses, draws, created_at`,
+      [username, username.toLowerCase(), email || null, email ? email.toLowerCase() : null, hash]
+    );
 
-    const token = signToken({ id: result.lastInsertRowid, username });
+    const token = signToken({ id: row.id, username: row.username });
     setCookie(res, token);
-    return res.json({
-      ok: true,
-      token,
-      user: {
-        id: result.lastInsertRowid,
-        username,
-        email: email || null,
-        rating_bullet: 1500, rating_blitz: 1500, rating_rapid: 1500, rating_classical: 1500,
-        games_played: 0, wins: 0, losses: 0, draws: 0,
-      }
-    });
+    res.json({ ok: true, token, user: row });
   } catch (e) {
     console.error('[register]', e);
     res.status(500).json({ error: 'Server error' });
@@ -78,22 +68,21 @@ router.post('/register', authLimiter, async (req, res) => {
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-    const db = getDb();
-    const user = db.prepare(`
-      SELECT id, username, email, password_hash,
-             rating_bullet, rating_blitz, rating_rapid, rating_classical,
-             games_played, wins, losses, draws
-      FROM users WHERE username = ? COLLATE NOCASE
-    `).get(username);
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+
+    const user = await one(
+      `SELECT id, username, email, password_hash,
+              rating_bullet, rating_blitz, rating_rapid, rating_classical,
+              games_played, wins, losses, draws
+       FROM users WHERE username_lower = $1`,
+      [username.toLowerCase()]
+    );
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const ok = await bcrypt.compare(password, user.password_hash);
+    const ok = await verifyPassword(user.password_hash, password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
-    db.prepare('UPDATE users SET last_seen = ? WHERE id = ?').run(Date.now(), user.id);
+    await query('UPDATE users SET last_seen = NOW() WHERE id = $1', [user.id]);
 
     const token = signToken({ id: user.id, username: user.username });
     setCookie(res, token);
@@ -110,14 +99,14 @@ router.post('/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-router.get('/me', authMiddleware, (req, res) => {
-  const db = getDb();
-  const user = db.prepare(`
-    SELECT id, username, email,
-           rating_bullet, rating_blitz, rating_rapid, rating_classical,
-           games_played, wins, losses, draws, created_at
-    FROM users WHERE id = ?
-  `).get(req.user.id);
+router.get('/me', authMiddleware, async (req, res) => {
+  const user = await one(
+    `SELECT id, username, email,
+            rating_bullet, rating_blitz, rating_rapid, rating_classical,
+            games_played, wins, losses, draws, created_at
+     FROM users WHERE id = $1`,
+    [req.user.id]
+  );
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user });
 });
