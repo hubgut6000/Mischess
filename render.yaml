@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: mischess
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server/index.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_DIR
+        value: /var/data
+    disk:
+      name: mischess-data
+      mountPath: /var/data
+      sizeGB: 1
