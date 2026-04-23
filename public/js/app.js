@@ -564,6 +564,13 @@ route('/play/ai', async () => {
 });
 
 async function startAiGame(preset, playerColor) {
+  // Check if Chess.js loaded
+  if (!window.Chess) {
+    toast('Chess library not loaded - refresh the page', 'error');
+    console.error('window.Chess is undefined');
+    return;
+  }
+
   // Initialize Stockfish engine (persistent across games if possible)
   if (!state.stockfish) {
     state.stockfish = new StockfishEngine();
@@ -571,7 +578,11 @@ async function startAiGame(preset, playerColor) {
   }
   try {
     await state.stockfish.init();
+    if (state.stockfish.useFallback) {
+      toast('Using fallback AI (Stockfish unavailable)', 'info');
+    }
   } catch (e) {
+    console.error('Stockfish init error:', e);
     toast('Engine failed to load, using fallback AI', 'error');
   }
   state.stockfish.newGame();
@@ -660,6 +671,7 @@ function renderAiGameView(aiGame) {
         // Async AI move — UI stays fluid
         requestAiMove(aiGame, board, moveList);
       }
+      return true;
     },
   });
   state.board = board;
