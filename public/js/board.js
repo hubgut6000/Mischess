@@ -199,6 +199,8 @@ export class Board {
         pieceEl.style.width = `${this.dragState.width * 0.92}px`;
         pieceEl.style.height = `${this.dragState.width * 0.92}px`;
         pieceEl.style.zIndex = '1000';
+        // Counter-rotate when board is flipped so piece appears right-side up
+        pieceEl.style.transform = this.orientation === 'black' ? 'rotate(180deg)' : '';
         this._moveDragEl(pos.x, pos.y);
       }
       if (ev.cancelable) ev.preventDefault();
@@ -219,6 +221,8 @@ export class Board {
   _moveDragEl(x, y) {
     if (!this.dragState) return;
     const w = this.dragState.width * 0.92;
+    // Always use raw screen coordinates for the dragged piece — it's position:fixed
+    // so it follows the actual cursor regardless of board orientation/CSS transform.
     this.dragState.pieceEl.style.left = (x - w / 2) + 'px';
     this.dragState.pieceEl.style.top = (y - w / 2) + 'px';
   }
@@ -238,6 +242,7 @@ export class Board {
     pieceEl.style.width = '';
     pieceEl.style.height = '';
     pieceEl.style.zIndex = '';
+    pieceEl.style.transform = '';
 
     const origin = this.dragState.origin;
     this.dragState = null;
