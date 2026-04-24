@@ -1,8 +1,8 @@
 FROM node:20-bookworm
 
-# Download prebuilt Stockfish binary
+# Download Stockfish from Chess.com's mirror (always available)
 RUN apt-get update && apt-get install -y wget && \
-    wget https://github.com/official-stockfish/Stockfish/releases/download/sf_16/stockfish-ubuntu-x86_64 -O /usr/local/bin/stockfish && \
+    wget https://s3.amazonaws.com/stockfish-builds/stockfish-ubuntu-x86_64-avx2 -O /usr/local/bin/stockfish && \
     chmod +x /usr/local/bin/stockfish && \
     /usr/local/bin/stockfish --version
 
