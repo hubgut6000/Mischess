@@ -366,13 +366,22 @@ route('/', async () => {
     const board = new Board(boardEl, { interactive: false });
     const famous = ['e4','c5','Nf3','d6','d4','cxd4','Nxd4','Nf6','Nc3','a6','Be2','e5','Nb3','Be7','O-O','O-O'];
     let i = 0;
+    let inCycle = false;
     const iv = setInterval(() => {
-      if (i >= famous.length) { i = 0; board.chess.reset(); board.render(); return; }
       if (!document.body.contains(wrap)) { clearInterval(iv); return; }
+      if (i >= famous.length) {
+        if (!inCycle) return; // Wait for next cycle
+        i = 0;
+        inCycle = false;
+        board.chess.reset();
+        board.render();
+        return;
+      }
+      inCycle = true;
       const m = board.chess.move(famous[i]);
       if (m) { board.setLastMove(m.from, m.to); board.render(); }
       i++;
-    }, 1400);
+    }, 2800);
   }, 100);
 
   return view;
