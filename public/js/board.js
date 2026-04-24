@@ -106,6 +106,10 @@ export class Board {
         pieceEl.dataset.type = p.type;
         const key = (p.color === 'w' ? 'w' : 'b') + p.type.toUpperCase();
         pieceEl.style.backgroundImage = `url("${PIECES[key]}")`;
+        // Counter-rotate pieces when board is flipped
+        if (this.orientation === 'black') {
+          pieceEl.style.transform = 'rotate(180deg)';
+        }
         sqEl.appendChild(pieceEl);
       }
     }
