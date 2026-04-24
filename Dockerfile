@@ -1,6 +1,5 @@
 FROM node:20-bookworm
 
-# Install Stockfish from Debian repos
 RUN apt-get update && apt-get install -y stockfish
 
 WORKDIR /app

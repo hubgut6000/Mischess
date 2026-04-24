@@ -298,153 +298,164 @@ function onWsMessage(ev) {
 // HOME
 route('/', async () => {
   const view = h('div');
-  const hero = h('section', { class: 'hero' },
-    h('div', {},
-      h('h1', { class: 'hero-title' }, 'Play chess. ', h('em', {}, 'Seriously.')),
-      h('p', { class: 'hero-sub' }, 'Mischess is a fast, fair, free chess platform. Ranked matches across four time controls, custom modes, live spectating, and the strongest anti-cheat in the game.'),
-      h('div', { class: 'hero-cta' },
-        h('a', { href: '#/play', 'data-link': '', class: 'btn btn-primary' }, 'Play now'),
-        h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-ghost' }, 'Play vs AI'),
-        h('a', { href: '#/leaderboard', 'data-link': '', class: 'btn btn-ghost' }, 'Leaderboard'),
-      ),
+
+  // Hero
+  const hero = h('section', { class: 'home-hero' },
+    h('span', { class: 'kicker' }, 'Free forever. No ads. Ever.'),
+    h('h1', {}, 'Chess, ', h('span', { class: 'ital' }, 'slowly.')),
+    h('p', { class: 'lead' },
+      "A cozy place to play serious chess. Fair matchmaking, honest anti-cheat, and room to breathe."),
+    h('div', { class: 'home-hero-actions' },
+      h('a', { href: state.user ? '#/play' : '#/register', 'data-link': '', class: 'btn btn-primary btn-lg' },
+        state.user ? 'Play now' : 'Get started'),
+      h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-outline btn-lg' }, 'Play vs AI'),
     ),
-    h('div', { class: 'hero-chessboard', id: 'hero-board' }),
   );
   view.appendChild(hero);
 
-  const stats = h('section', { class: 'stats-strip', id: 'stats' });
-  view.appendChild(stats);
+  // Animated board
+  const previewWrap = h('div', { class: 'home-board-preview', id: 'home-board-wrap' });
+  view.appendChild(previewWrap);
 
-  view.appendChild(h('section', { class: 'features' },
-    h('div', { class: 'feature-card' },
+  // 3-up features
+  view.appendChild(h('section', { class: 'home-features' },
+    h('div', { class: 'home-feature' },
+      h('div', { class: 'icon' },
+        h('svg', { width: '24', height: '24', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+          h('path', { d: 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83' }),
+        ),
+      ),
       h('h3', {}, 'Real-time play'),
-      h('p', {}, 'Bullet, blitz, rapid, classical. Sub-100ms move transport over WebSocket. Clocks accurate to the millisecond.'),
+      h('p', {}, 'Bullet, blitz, rapid, classical. Clocks accurate to the millisecond. Sub-100ms move transport over WebSocket.'),
     ),
-    h('div', { class: 'feature-card' },
-      h('h3', {}, 'Fair play, enforced'),
-      h('p', {}, 'Continuous move-time analysis, focus tracking, and multi-account detection. Cheaters get caught, honest players get clean games.'),
+    h('div', { class: 'home-feature' },
+      h('div', { class: 'icon' },
+        h('svg', { width: '24', height: '24', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+          h('path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }),
+        ),
+      ),
+      h('h3', {}, 'Fair play, quietly'),
+      h('p', {}, 'Every rated game analyzed with Stockfish. Suspicious accounts are shadow-pooled with each other. You never notice them.'),
     ),
-    h('div', { class: 'feature-card' },
-      h('h3', {}, 'Custom modes'),
-      h('p', {}, 'Beyond standard: try Chaos Chess, Berserk Blitz, King of the Hill-style variants, and private challenges with friends.'),
+    h('div', { class: 'home-feature' },
+      h('div', { class: 'icon' },
+        h('svg', { width: '24', height: '24', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+          h('circle', { cx: '12', cy: '12', r: '10' }),
+          h('path', { d: 'M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01' }),
+        ),
+      ),
+      h('h3', {}, 'Yours to keep'),
+      h('p', {}, 'Five themes, custom profile, bio and title. Open source. No tracking, no dark patterns, no upsells.'),
     ),
   ));
 
-  // Hero board - animated random game
+  // Manifesto
+  view.appendChild(h('section', { class: 'home-manifesto' },
+    h('div', { class: 'text' },
+      "Most chess sites treat you like a product. We're building the one that treats you like a player.",
+    ),
+    h('div', { class: 'byline' }, '— Mischess'),
+  ));
+
+  // Boot the board animation
   setTimeout(() => {
-    const boardEl = $('#hero-board');
-    if (!boardEl) return;
+    const wrap = $('#home-board-wrap');
+    if (!wrap) return;
+    const boardEl = document.createElement('div');
+    wrap.appendChild(boardEl);
     const board = new Board(boardEl, { interactive: false });
-    board.setPosition('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
-    // Auto-play a famous opening
-    const opening = ['e4','e5','Nf3','Nc6','Bb5','a6','Ba4','Nf6','O-O','Be7','Re1','b5','Bb3','d6','c3','O-O'];
+    const famous = ['e4','c5','Nf3','d6','d4','cxd4','Nxd4','Nf6','Nc3','a6','Be2','e5','Nb3','Be7','O-O','O-O'];
     let i = 0;
     const iv = setInterval(() => {
-      if (i >= opening.length) { clearInterval(iv); return; }
-      if (!document.body.contains(boardEl)) { clearInterval(iv); return; }
-      const from = board.chess.fen();
-      const m = board.chess.move(opening[i]);
-      if (m) board.setLastMove(m.from, m.to);
-      board.render();
+      if (i >= famous.length) { i = 0; board.chess.reset(); board.render(); return; }
+      if (!document.body.contains(wrap)) { clearInterval(iv); return; }
+      const m = board.chess.move(famous[i]);
+      if (m) { board.setLastMove(m.from, m.to); board.render(); }
       i++;
-    }, 1200);
+    }, 1400);
   }, 100);
 
-  // Fetch stats
-  try {
-    const [live, recent] = await Promise.all([
-      fetch('/api/games/live').then(r => r.json()).catch(() => ({ games: [] })),
-      fetch('/api/games/recent').then(r => r.json()).catch(() => ({ games: [] })),
-    ]);
-    const statsEl = $('#stats', view);
-    statsEl.appendChild(h('div', { class: 'stat' },
-      h('div', { class: 'stat-number' }, String(live.games.length)),
-      h('div', { class: 'stat-label' }, 'Live games')));
-    statsEl.appendChild(h('div', { class: 'stat' },
-      h('div', { class: 'stat-number' }, String(recent.games.length)),
-      h('div', { class: 'stat-label' }, 'Games today')));
-    statsEl.appendChild(h('div', { class: 'stat' },
-      h('div', { class: 'stat-number' }, '4'),
-      h('div', { class: 'stat-label' }, 'Time controls')));
-    statsEl.appendChild(h('div', { class: 'stat' },
-      h('div', { class: 'stat-number' }, '0'),
-      h('div', { class: 'stat-label' }, 'Ads, ever')));
-  } catch {}
   return view;
 });
 
 // LOGIN
 route('/login', async () => {
   if (state.user) { navigate('#/'); return null; }
-  const view = h('div', { class: 'auth-page' });
-  view.appendChild(h('h2', {}, 'Welcome back'));
-  const errBox = h('div');
-  view.appendChild(errBox);
-  const form = h('form', { onsubmit: async (e) => {
+  const view = h('div');
+  const form = h('form', { class: 'form', onsubmit: async (e) => {
     e.preventDefault();
     const username = $('input[name=username]', form).value;
     const password = $('input[name=password]', form).value;
-    errBox.innerHTML = '';
+    const errBox = $('#err', form);
+    errBox.textContent = '';
     try {
       const { user, token } = await api('/api/auth/login', { method: 'POST', body: { username, password } });
       state.user = user;
       state.token = token;
       saveToken(token);
+      if (user.theme) applyTheme(user.theme);
       renderAuthArea();
-      toast('Signed in', 'success');
+      toast('Welcome back', 'success');
       navigate('#/');
     } catch (err) {
-      errBox.appendChild(h('div', { class: 'error-message' }, err.message));
+      errBox.textContent = err.message;
+      sound.error();
     }
   }});
+  form.appendChild(h('h1', {}, 'Welcome back'));
+  form.appendChild(h('p', { class: 'lead' }, 'Sign in to pick up where you left off.'));
+  form.appendChild(h('div', { id: 'err', style: 'color:var(--negative);margin-bottom:14px' }));
   form.appendChild(fieldInput('Username', 'username', 'text', true));
   form.appendChild(fieldInput('Password', 'password', 'password', true));
-  form.appendChild(h('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Sign in'));
+  form.appendChild(h('button', { class: 'btn btn-primary btn-block btn-lg', type: 'submit', style: 'margin-top:8px' }, 'Sign in'));
+  form.appendChild(h('p', { class: 'form-footer' }, 'No account? ',
+    h('a', { href: '#/register', 'data-link': '' }, 'Create one here')));
   view.appendChild(form);
-  view.appendChild(h('p', { class: 'form-meta' }, 'No account? ',
-    h('a', { href: '#/register', 'data-link': '' }, 'Create one')));
   return view;
 });
 
 // REGISTER
 route('/register', async () => {
   if (state.user) { navigate('#/'); return null; }
-  const view = h('div', { class: 'auth-page' });
-  view.appendChild(h('h2', {}, 'Create account'));
-  const errBox = h('div');
-  view.appendChild(errBox);
-  const form = h('form', { onsubmit: async (e) => {
+  const view = h('div');
+  const form = h('form', { class: 'form', onsubmit: async (e) => {
     e.preventDefault();
     const username = $('input[name=username]', form).value;
     const email = $('input[name=email]', form).value;
     const password = $('input[name=password]', form).value;
-    errBox.innerHTML = '';
+    const errBox = $('#err', form);
+    errBox.textContent = '';
     try {
       const { user, token } = await api('/api/auth/register', { method: 'POST', body: { username, email, password } });
       state.user = user;
       state.token = token;
       saveToken(token);
+      if (user.theme) applyTheme(user.theme);
       renderAuthArea();
       toast('Welcome to Mischess', 'success');
       navigate('#/');
     } catch (err) {
-      errBox.appendChild(h('div', { class: 'error-message' }, err.message));
+      errBox.textContent = err.message;
+      sound.error();
     }
   }});
+  form.appendChild(h('h1', {}, 'Create account'));
+  form.appendChild(h('p', { class: 'lead' }, "Join us. It's free and always will be."));
+  form.appendChild(h('div', { id: 'err', style: 'color:var(--negative);margin-bottom:14px' }));
   form.appendChild(fieldInput('Username', 'username', 'text', true));
   form.appendChild(fieldInput('Email (optional)', 'email', 'email', false));
   form.appendChild(fieldInput('Password', 'password', 'password', true));
-  form.appendChild(h('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Create account'));
-  view.appendChild(form);
-  view.appendChild(h('p', { class: 'form-meta' }, 'Have an account? ',
+  form.appendChild(h('button', { class: 'btn btn-primary btn-block btn-lg', type: 'submit', style: 'margin-top:8px' }, 'Create account'));
+  form.appendChild(h('p', { class: 'form-footer' }, 'Have an account? ',
     h('a', { href: '#/login', 'data-link': '' }, 'Sign in')));
+  view.appendChild(form);
   return view;
 });
 
 function fieldInput(label, name, type, required) {
-  return h('div', { class: 'form-field' },
+  return h('div', { class: 'form-group' },
     h('label', {}, label),
-    h('input', { name, type, required: required ? '' : null, autocomplete: type === 'password' ? 'current-password' : 'username' }),
+    h('input', { type, name, required: required ? '' : null, autocomplete: name === 'password' ? 'current-password' : name }),
   );
 }
 
@@ -456,8 +467,9 @@ route('/play', async () => {
 
 function renderPlayPicker() {
   const view = h('div', { class: 'play-layout' });
+  view.appendChild(h('span', { class: 'kicker' }, 'Matchmaking'));
   view.appendChild(h('h1', {}, 'New game'));
-  view.appendChild(h('p', {}, 'Pick a time control to find an opponent.'));
+  view.appendChild(h('p', { class: 'lead' }, 'Pick a time control. We\'ll find you a fair opponent.'));
 
   const TC = [
     { initial: 60,   inc: 0, label: '1+0',  cat: 'Bullet' },
@@ -472,12 +484,15 @@ function renderPlayPicker() {
     { initial: 1800, inc: 20, label: '30+20', cat: 'Classical' },
   ];
   let selected = TC[3];
-  const grid = h('div', { class: 'time-control-grid' });
+  let rated = true;
+
+  const grid = h('div', { class: 'tc-grid' });
   TC.forEach(tc => {
     const card = h('div', { class: 'tc-card' + (tc === selected ? ' selected' : ''), onclick: () => {
       selected = tc;
       $$('.tc-card', grid).forEach(c => c.classList.remove('selected'));
       card.classList.add('selected');
+      sound.click();
     }},
       h('div', { class: 'tc-time' }, tc.label),
       h('div', { class: 'tc-cat' }, tc.cat),
@@ -486,20 +501,34 @@ function renderPlayPicker() {
   });
   view.appendChild(grid);
 
-  const ratedToggle = h('label', { class: 'form-field', style: 'display:flex;gap:8px;align-items:center;justify-content:center;margin:0;' },
-    h('input', { type: 'checkbox', name: 'rated', checked: '' }),
-    h('span', {}, 'Rated'),
-  );
+  // Rated toggle styled as segment
+  const ratedRow = h('div', { class: 'play-options-row' });
+  const ratedBtn = h('button', { class: 'btn btn-primary btn-sm', onclick: () => {
+    rated = true;
+    ratedBtn.className = 'btn btn-primary btn-sm';
+    casualBtn.className = 'btn btn-outline btn-sm';
+    sound.click();
+  }}, 'Rated');
+  const casualBtn = h('button', { class: 'btn btn-outline btn-sm', onclick: () => {
+    rated = false;
+    casualBtn.className = 'btn btn-primary btn-sm';
+    ratedBtn.className = 'btn btn-outline btn-sm';
+    sound.click();
+  }}, 'Casual');
+  ratedRow.appendChild(ratedBtn);
+  ratedRow.appendChild(casualBtn);
+  view.appendChild(ratedRow);
 
-  view.appendChild(h('div', { class: 'play-controls' },
-    ratedToggle,
-    h('button', { class: 'btn btn-primary', onclick: async () => {
-      const rated = $('input[name=rated]', ratedToggle).checked;
+  view.appendChild(h('div', { class: 'play-action' },
+    h('button', { class: 'btn btn-primary btn-lg', onclick: async () => {
       await startSeek(selected.initial, selected.inc, rated);
     }}, 'Find opponent'),
-    h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-ghost' }, 'Play vs Computer'),
-    h('a', { href: '#/play/custom', 'data-link': '', class: 'btn btn-ghost' }, 'Custom modes'),
+  ));
+
+  view.appendChild(h('div', { class: 'play-options-row', style: 'margin-top:32px' },
+    h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-ghost' }, 'Play vs computer'),
     h('a', { href: '#/play/friend', 'data-link': '', class: 'btn btn-ghost' }, 'Challenge friend'),
+    h('a', { href: '#/play/custom', 'data-link': '', class: 'btn btn-ghost' }, 'Custom modes'),
   ));
 
   view.appendChild(h('div', { id: 'queue-status' }));
@@ -514,10 +543,10 @@ async function startSeek(initialTime, increment, rated) {
   if (status) {
     status.innerHTML = '';
     status.appendChild(h('div', { class: 'queue-status' },
-      h('span', { class: 'pulse' }),
-      h('span', {}, `Searching for opponent  (${initialTime/60}+${increment}${rated ? ', rated' : ', casual'})...`),
-      h('div', { style: 'margin-top:14px' },
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: cancelSeek }, 'Cancel')),
+      h('div', { class: 'status-text' },
+        h('span', { class: 'dot' }),
+        `Searching for opponent · ${initialTime/60}+${increment} · ${rated ? 'rated' : 'casual'}`),
+      h('button', { class: 'btn btn-outline btn-sm', onclick: cancelSeek }, 'Cancel'),
     ));
   }
 }
@@ -556,7 +585,7 @@ route('/play/ai', async () => {
   let selected = PRESETS[2];
   let color = 'white';
 
-  const grid = h('div', { class: 'time-control-grid' });
+  const grid = h('div', { class: 'tc-grid' });
   PRESETS.forEach(p => {
     const c = h('div', { class: 'tc-card' + (p === selected ? ' selected' : ''), onclick: () => {
       selected = p;
@@ -570,7 +599,7 @@ route('/play/ai', async () => {
   });
   view.appendChild(grid);
 
-  const colorRow = h('div', { class: 'play-controls' });
+  const colorRow = h('div', { class: 'play-options-row' });
   ['white', 'random', 'black'].forEach(cName => {
     const btn = h('button', { class: 'btn btn-ghost' + (cName === color ? ' btn-primary' : ''),
       onclick: () => { color = cName; $$('button', colorRow).forEach((b,i) => b.classList.toggle('btn-primary', ['white','random','black'][i] === cName)); }
@@ -579,7 +608,7 @@ route('/play/ai', async () => {
   });
   view.appendChild(colorRow);
 
-  view.appendChild(h('div', { class: 'play-controls' },
+  view.appendChild(h('div', { class: 'play-options-row' },
     h('button', { class: 'btn btn-primary', onclick: () => {
       const finalColor = color === 'random' ? (Math.random() < 0.5 ? 'white' : 'black') : color;
       startAiGame(selected, finalColor);
@@ -845,9 +874,9 @@ route('/play/custom', async () => {
     },
   ];
 
-  const grid = h('div', { class: 'features' });
+  const grid = h('div', { class: 'home-features' });
   MODES.forEach(m => {
-    grid.appendChild(h('div', { class: 'feature-card' },
+    grid.appendChild(h('div', { class: "card" },
       h('h3', {}, m.title),
       h('p', {}, m.desc),
       h('div', { style: 'margin-top:14px' },
@@ -921,7 +950,7 @@ function startCustomAiGame(fen, name, rules = {}) {
   boardCol.appendChild(meStrip);
 
   const moveList = h('div', { class: 'move-list' }, h('div', { class: 'moves' }));
-  const info = h('div', { class: 'feature-card' },
+  const info = h('div', { class: "card" },
     h('h3', {}, name),
     h('p', { id: 'custom-info' }, 'Your move.'),
   );
@@ -1023,7 +1052,7 @@ route('/play/friend', async () => {
     { initial: 600, inc: 0, label: '10+0' },
     { initial: 1800, inc: 20, label: '30+20' },
   ];
-  const grid = h('div', { class: 'time-control-grid' });
+  const grid = h('div', { class: 'tc-grid' });
   TC.forEach(tc => {
     const c = h('div', { class: 'tc-card' + (tc === selected ? ' selected' : ''), onclick: () => {
       selected = tc;
@@ -1038,7 +1067,7 @@ route('/play/friend', async () => {
     h('p', {}, 'Your invite link will appear here. Keep this page open while you wait.'));
   view.appendChild(linkBox);
 
-  view.appendChild(h('div', { class: 'play-controls' },
+  view.appendChild(h('div', { class: 'play-options-row' },
     h('button', { class: 'btn btn-primary', onclick: async () => {
       // Use WebSocket seek with a private key (simulate via unusual time control combo)
       // Simpler: use seek with a custom flag
@@ -1110,7 +1139,7 @@ route('/leaderboard', async () => {
       body.appendChild(table);
     } catch (e) {
       body.innerHTML = '';
-      body.appendChild(h('p', { class: 'error-message' }, e.message));
+      body.appendChild(h('p', { class: 'toast error' }, e.message));
     }
   }
   await loadLB();
@@ -1159,7 +1188,7 @@ route('/watch', async () => {
       ));
     }
   } catch (e) {
-    view.appendChild(h('p', { class: 'error-message' }, e.message));
+    view.appendChild(h('p', { class: 'toast error' }, e.message));
   }
   return view;
 });
@@ -1221,7 +1250,7 @@ route('/profile/:username', async (params) => {
     // Friend actions
     if (state.user && state.user.username.toLowerCase() !== user.username.toLowerCase()) {
       view.insertBefore(
-        h('div', { class: 'play-controls', style: 'justify-content:flex-start;margin-bottom:24px' },
+        h('div', { class: 'play-options-row', style: 'justify-content:flex-start;margin-bottom:24px' },
           h('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
             try {
               await api('/api/friends', { method: 'POST', body: { username: user.username }});
@@ -1235,7 +1264,7 @@ route('/profile/:username', async (params) => {
     }
   } catch (e) {
     view.innerHTML = '';
-    view.appendChild(h('p', { class: 'error-message' }, e.message));
+    view.appendChild(h('p', { class: 'toast error' }, e.message));
   }
   return view;
 });
@@ -1268,7 +1297,7 @@ route('/friends', async () => {
       ));
     }
   } catch (e) {
-    list.appendChild(h('p', { class: 'error-message' }, e.message));
+    list.appendChild(h('p', { class: 'toast error' }, e.message));
   }
   return view;
 });
@@ -1294,7 +1323,7 @@ route('/game/:id', async (params) => {
       return renderFinishedGame(data.game);
     }
   } catch (e) {
-    return h('div', { class: 'error-message' }, e.message);
+    return h('div', { class: 'toast error' }, e.message);
   }
 });
 
@@ -1317,7 +1346,7 @@ function renderFinishedGame(game) {
   ));
 
   const sideCol = h('div', { class: 'game-side-col' });
-  sideCol.appendChild(h('div', { class: 'feature-card' },
+  sideCol.appendChild(h('div', { class: "card" },
     h('h3', {}, `${game.result || '?'} — ${game.termination}`),
     h('p', {}, `${game.category} - ${game.time_control}`),
     game.white_rating_after && game.white_rating_before ? h('p', {},
@@ -1353,68 +1382,85 @@ function renderGamePage(game) {
   const topPlayer = orientation === 'white' ? 'black' : 'white';
   const botPlayer = orientation === 'white' ? 'white' : 'black';
 
-  const topStrip = h('div', { class: 'player-strip' },
+  const topStrip = h('div', { class: 'player-strip', id: 'strip-top' },
     h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, game[topPlayer]),
-      h('span', { class: 'rating' }, String(game[topPlayer + 'Rating'])),
+      h('div', { class: 'avatar' }, game[topPlayer][0].toUpperCase()),
+      h('div', { class: 'name-block' },
+        h('div', { class: 'name' }, game[topPlayer]),
+        h('div', { class: 'rating' }, String(game[topPlayer + 'Rating'])),
+      ),
     ),
     h('div', { class: 'clock', id: 'clock-top' }, fmtTime(game[topPlayer + 'Time'])),
   );
   boardCol.appendChild(topStrip);
   const boardEl = h('div');
   boardCol.appendChild(boardEl);
-  const botStrip = h('div', { class: 'player-strip' },
+  const botStrip = h('div', { class: 'player-strip', id: 'strip-bot' },
     h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, game[botPlayer]),
-      h('span', { class: 'rating' }, String(game[botPlayer + 'Rating'])),
+      h('div', { class: 'avatar' }, game[botPlayer][0].toUpperCase()),
+      h('div', { class: 'name-block' },
+        h('div', { class: 'name' }, game[botPlayer]),
+        h('div', { class: 'rating' }, String(game[botPlayer + 'Rating'])),
+      ),
     ),
     h('div', { class: 'clock', id: 'clock-bot' }, fmtTime(game[botPlayer + 'Time'])),
   );
   boardCol.appendChild(botStrip);
 
   const sideCol = h('div', { class: 'game-side-col' });
-  const info = h('div', { class: 'feature-card' },
-    h('p', {}, `${game.category} - ${game.timeControl}${game.rated ? ' - rated' : ' - casual'}`),
-  );
-  sideCol.appendChild(info);
 
+  // Moves card
+  const movesCard = h('div', { class: 'side-card' });
+  movesCard.appendChild(h('div', { class: 'side-card-header' },
+    h('h4', {}, 'Moves'),
+    h('span', { style: 'font-family:var(--font-mono);font-size:0.78rem;color:var(--ink-3)' },
+      `${game.category} · ${game.timeControl}${game.rated ? ' · rated' : ''}`),
+  ));
   const movesEl = h('div', { class: 'move-list' }, h('div', { class: 'moves' }));
-  sideCol.appendChild(movesEl);
+  movesCard.appendChild(movesEl);
 
   const isPlayer = state.playerColor !== null;
-  const actions = h('div', { class: 'game-actions' });
-  if (isPlayer) {
-    actions.appendChild(h('button', { class: 'btn btn-ghost btn-sm', onclick: () => {
-      if (confirm('Resign this game?')) sendWs({ type: 'resign' });
-    }}, 'Resign'));
-    actions.appendChild(h('button', { class: 'btn btn-ghost btn-sm', onclick: () => {
-      sendWs({ type: 'offerDraw' });
-      toast('Draw offered');
-    }}, 'Draw'));
-    if (game.moves.length < 2) {
-      actions.appendChild(h('button', { class: 'btn btn-danger btn-sm', onclick: () => {
-        sendWs({ type: 'abort' });
-      }}, 'Abort'));
+  if (isPlayer || !game.ended) {
+    const actions = h('div', { class: 'game-actions' });
+    if (isPlayer) {
+      actions.appendChild(h('button', { class: 'btn btn-outline btn-sm', onclick: () => {
+        if (confirm('Resign this game?')) sendWs({ type: 'resign' });
+      }}, 'Resign'));
+      actions.appendChild(h('button', { class: 'btn btn-outline btn-sm', onclick: () => {
+        sendWs({ type: 'offerDraw' });
+        toast('Draw offered');
+      }}, 'Draw'));
+      if (game.moves.length < 2) {
+        actions.appendChild(h('button', { class: 'btn btn-outline btn-sm', onclick: () => {
+          sendWs({ type: 'abort' });
+        }}, 'Abort'));
+      }
     }
+    movesCard.appendChild(actions);
   }
-  sideCol.appendChild(actions);
+  sideCol.appendChild(movesCard);
 
-  // Chat
-  const chatBox = h('div', { class: 'chat-box' });
-  const chatMessages = h('div', { class: 'chat-messages', id: 'chat-messages' });
-  const chatInput = h('input', { placeholder: 'Say something...', maxlength: '200' });
-  const chatForm = h('form', { class: 'chat-input', onsubmit: (e) => {
-    e.preventDefault();
-    const text = chatInput.value.trim();
-    if (!text) return;
-    sendWs({ type: 'chat', text });
-    chatInput.value = '';
-  }});
-  chatForm.appendChild(chatInput);
-  chatForm.appendChild(h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Send'));
-  chatBox.appendChild(chatMessages);
-  chatBox.appendChild(chatForm);
-  sideCol.appendChild(chatBox);
+  // Chat card
+  if (isPlayer) {
+    const chatCard = h('div', { class: 'side-card' });
+    chatCard.appendChild(h('div', { class: 'side-card-header' }, h('h4', {}, 'Chat')));
+    const chatBox = h('div', { class: 'chat-box' });
+    const chatMessages = h('div', { class: 'chat-messages', id: 'chat-messages' });
+    const chatInput = h('input', { placeholder: 'Say something...', maxlength: '200' });
+    const chatForm = h('form', { class: 'chat-input', onsubmit: (e) => {
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (!text) return;
+      sendWs({ type: 'chat', text });
+      chatInput.value = '';
+    }});
+    chatForm.appendChild(chatInput);
+    chatForm.appendChild(h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Send'));
+    chatBox.appendChild(chatMessages);
+    chatBox.appendChild(chatForm);
+    chatCard.appendChild(chatBox);
+    sideCol.appendChild(chatCard);
+  }
 
   view.appendChild(boardCol);
   view.appendChild(sideCol);
@@ -1457,6 +1503,8 @@ function updateClockDisplays() {
   const botPlayer = orientation === 'white' ? 'white' : 'black';
   const topEl = $('#clock-top');
   const botEl = $('#clock-bot');
+  const topStrip = $('#strip-top');
+  const botStrip = $('#strip-bot');
   if (topEl) {
     topEl.textContent = fmtTime(game[topPlayer + 'Time']);
     topEl.classList.toggle('active', game.turn === topPlayer && !game.ended);
@@ -1467,6 +1515,8 @@ function updateClockDisplays() {
     botEl.classList.toggle('active', game.turn === botPlayer && !game.ended);
     botEl.classList.toggle('low', game[botPlayer + 'Time'] < 20000);
   }
+  if (topStrip) topStrip.classList.toggle('active-turn', game.turn === topPlayer && !game.ended);
+  if (botStrip) botStrip.classList.toggle('active-turn', game.turn === botPlayer && !game.ended);
 }
 
 function onGameStart(game, yourColor) {
@@ -1619,13 +1669,15 @@ function cleanupGame() {
 
 // SETTINGS
 route('/settings', async () => {
-  const view = h('div', { style: 'max-width:720px;margin:0 auto' });
+  const view = h('div', { class: 'settings-layout' });
+  view.appendChild(h('span', { class: 'kicker' }, 'Your space'));
   view.appendChild(h('h1', {}, 'Settings'));
+  view.appendChild(h('p', { class: 'lead' }, 'Make Mischess yours.'));
 
   // ===== Theme picker =====
-  const themeSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  const themeSection = h('div', { class: "settings-section" });
   themeSection.appendChild(h('h3', {}, 'Theme'));
-  themeSection.appendChild(h('p', { style: 'margin-bottom:14px' }, 'Pick the vibe. Saved to your account if signed in.'));
+  themeSection.appendChild(h('p', { class: 'section-desc' }, 'Pick the vibe. Saved to your account if signed in.'));
   const themeGrid = h('div', { class: 'theme-grid' });
   const THEMES = [
     { id: 'cozy', name: 'Cozy' },
@@ -1661,7 +1713,7 @@ route('/settings', async () => {
   view.appendChild(themeSection);
 
   // ===== Audio =====
-  const audioSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  const audioSection = h('div', { class: "settings-section" });
   audioSection.appendChild(h('h3', {}, 'Audio'));
 
   const makeToggle = (label, description, key) => {
@@ -1700,7 +1752,7 @@ route('/settings', async () => {
 
   // ===== Profile editor (if logged in) =====
   if (state.user) {
-    const profileSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+    const profileSection = h('div', { class: "settings-section" });
     profileSection.appendChild(h('h3', {}, 'Profile'));
     profileSection.appendChild(h('p', { style: 'margin-bottom:14px' }, 'Customize how others see you.'));
 
@@ -1756,7 +1808,7 @@ route('/settings', async () => {
   }
 
   // ===== Account =====
-  const accountSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  const accountSection = h('div', { class: "settings-section" });
   accountSection.appendChild(h('h3', {}, 'Account'));
   if (state.user) {
     accountSection.appendChild(h('p', {}, `Signed in as `, h('strong', {}, state.user.username)));
