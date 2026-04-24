@@ -225,8 +225,8 @@ export class Board {
   _moveDragEl(x, y) {
     if (!this.dragState) return;
     const w = this.dragState.width * 0.92;
-    // Always use raw screen coordinates for the dragged piece — it's position:fixed
-    // so it follows the actual cursor regardless of board orientation/CSS transform.
+    // Use viewport coordinates directly for position:fixed elements
+    // This makes the piece follow the cursor regardless of board orientation
     this.dragState.pieceEl.style.left = (x - w / 2) + 'px';
     this.dragState.pieceEl.style.top = (y - w / 2) + 'px';
   }
