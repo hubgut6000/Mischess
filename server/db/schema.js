@@ -24,9 +24,21 @@ CREATE TABLE IF NOT EXISTS users (
   flagged_at TIMESTAMPTZ,
   recent_accuracies NUMERIC[] NOT NULL DEFAULT ARRAY[]::NUMERIC[],
   recent_acpls NUMERIC[] NOT NULL DEFAULT ARRAY[]::NUMERIC[],
+  bio TEXT,
+  country TEXT,
+  theme TEXT DEFAULT 'cozy',
+  piece_set TEXT DEFAULT 'classic',
+  title TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add columns if users table existed before this migration
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'cozy';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS piece_set TEXT DEFAULT 'classic';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS title TEXT;
 
 CREATE TABLE IF NOT EXISTS games (
   id TEXT PRIMARY KEY,

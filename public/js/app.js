@@ -2,6 +2,7 @@ import { Board } from './board.js';
 import { findBestMove } from './ai.js';
 import { sound, installClickSounds } from './sound.js';
 import { StockfishEngine } from './stockfish.js';
+import { AntiCheatTelemetry } from './anticheat.js';
 
 // ---------- State ----------
 const state = {
@@ -27,7 +28,7 @@ function loadSettings() {
   return defaultSettings();
 }
 function defaultSettings() {
-  return { sound: true, moveSound: true, boardTheme: 'classic' };
+  return { sound: true, moveSound: true, boardTheme: 'classic', theme: 'cozy' };
 }
 function saveSettings() {
   try { localStorage.setItem('mischess:settings', JSON.stringify(state.settings)); } catch {}
@@ -73,9 +74,21 @@ function fmtTime(ms) {
   return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 
+// Read CSRF token from cookie (set by server on login/register/me)
+function getCsrf() {
+  const m = document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+  // Add CSRF token for state-changing requests
+  const method = (opts.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const csrf = getCsrf();
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+  }
   const res = await fetch(path, {
     ...opts,
     headers,
@@ -86,6 +99,14 @@ async function api(path, opts = {}) {
   try { data = await res.json(); } catch {}
   if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
   return data;
+}
+
+// ---------- Theme ----------
+function applyTheme(theme) {
+  if (!theme) theme = 'cozy';
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('mischess:theme', theme); } catch {}
+  state.settings.theme = theme;
 }
 
 // ---------- Auth ----------
@@ -100,6 +121,8 @@ async function checkAuth() {
   try {
     const { user } = await api('/api/auth/me');
     state.user = user;
+    // Apply user's saved theme
+    if (user.theme) applyTheme(user.theme);
     renderAuthArea();
   } catch (e) {
     state.token = null;
@@ -112,11 +135,17 @@ function renderAuthArea() {
   const area = $('#auth-area');
   area.innerHTML = '';
   if (state.user) {
-    area.appendChild(h('div', { class: 'user-menu' },
+    const initial = state.user.username[0].toUpperCase();
+    area.appendChild(h('a', {
+      href: `#/profile/${state.user.username}`,
+      'data-link': '',
+      class: 'user-pill',
+    },
+      h('span', { class: 'avatar' }, initial),
+      h('span', { class: 'username' }, state.user.username),
       h('span', { class: 'rating' }, `${state.user.rating_blitz}`),
-      h('a', { href: `#/profile/${state.user.username}`, 'data-link': '', class: 'username' }, state.user.username),
-      h('button', { class: 'btn btn-ghost btn-sm', onclick: logout }, 'Sign out'),
     ));
+    area.appendChild(h('button', { class: 'btn btn-ghost btn-sm', onclick: logout }, 'Sign out'));
   } else {
     area.appendChild(h('a', { href: '#/login', 'data-link': '', class: 'btn btn-ghost' }, 'Sign in'));
     area.appendChild(h('a', { href: '#/register', 'data-link': '', class: 'btn btn-primary' }, 'Register'));
@@ -1143,10 +1172,24 @@ route('/profile/:username', async (params) => {
     const { user, recentGames } = await api('/api/users/' + encodeURIComponent(params.username));
     view.innerHTML = '';
     const createdAt = new Date(user.created_at);
-    view.appendChild(h('div', { class: 'profile-header' },
-      h('h1', {}, user.username),
-      h('span', { class: 'joined' }, `member since ${createdAt.toLocaleDateString()}`),
-    ));
+    const initial = user.username[0].toUpperCase();
+
+    const headerChildren = [
+      h('div', { class: 'profile-avatar' }, initial),
+      h('div', { class: 'profile-info' },
+        h('h1', {}, user.username,
+          user.title ? h('span', {
+            style: 'margin-left:10px;font-size:0.7em;padding:3px 10px;background:var(--accent-muted);color:var(--accent);border-radius:999px;vertical-align:middle',
+          }, user.title) : null,
+          user.country ? h('span', {
+            style: 'margin-left:8px;font-size:0.6em;color:var(--text-dim);vertical-align:middle',
+          }, user.country) : null,
+        ),
+        h('div', { class: 'joined' }, `Member since ${createdAt.toLocaleDateString()}`),
+        user.bio ? h('div', { class: 'bio' }, user.bio) : null,
+      ),
+    ];
+    view.appendChild(h('div', { class: 'profile-header' }, ...headerChildren));
     view.appendChild(h('div', { class: 'rating-grid' },
       ratingCard('Bullet', user.rating_bullet),
       ratingCard('Blitz', user.rating_blitz),
@@ -1432,8 +1475,14 @@ function onGameStart(game, yourColor) {
   state.game = game;
   state.playerColor = yourColor;
   state.lastFen = game.fen;
+  // Activate anti-cheat telemetry for this game
+  if (yourColor && !state.telemetry) {
+    state.telemetry = new AntiCheatTelemetry((msg) => sendWs(msg));
+  }
+  if (state.telemetry && yourColor) {
+    state.telemetry.activate(game.id);
+  }
   navigate('#/game/' + game.id);
-  // render happens via hashchange
   setTimeout(() => renderRoute(), 50);
 }
 
@@ -1494,6 +1543,7 @@ function showDrawOfferModal() {
 
 function onGameEnd(game) {
   state.game = game;
+  if (state.telemetry) state.telemetry.deactivate();
   if (state.board) {
     state.board.setInteractive(false);
     state.board.setPosition(game.fen);
@@ -1569,61 +1619,154 @@ function cleanupGame() {
 
 // SETTINGS
 route('/settings', async () => {
-  const view = h('div', { style: 'max-width:560px;margin:0 auto' });
+  const view = h('div', { style: 'max-width:720px;margin:0 auto' });
   view.appendChild(h('h1', {}, 'Settings'));
 
-  const section = (title, child) => h('div', { class: 'feature-card', style: 'margin-bottom:16px' },
-    h('h3', {}, title), child);
-
-  const toggleRow = (label, key, description) => {
-    const row = h('label', {
-      style: 'display:flex;justify-content:space-between;align-items:center;padding:8px 0;cursor:pointer',
+  // ===== Theme picker =====
+  const themeSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  themeSection.appendChild(h('h3', {}, 'Theme'));
+  themeSection.appendChild(h('p', { style: 'margin-bottom:14px' }, 'Pick the vibe. Saved to your account if signed in.'));
+  const themeGrid = h('div', { class: 'theme-grid' });
+  const THEMES = [
+    { id: 'cozy', name: 'Cozy' },
+    { id: 'dark', name: 'Dark' },
+    { id: 'forest', name: 'Forest' },
+    { id: 'rose', name: 'Rose' },
+    { id: 'ocean', name: 'Ocean' },
+  ];
+  const currentTheme = state.settings.theme || 'cozy';
+  THEMES.forEach(t => {
+    const opt = h('div', {
+      class: 'theme-option' + (t.id === currentTheme ? ' active' : ''),
+      'data-preview': t.id,
+      onclick: async () => {
+        applyTheme(t.id);
+        saveSettings();
+        $$('.theme-option', themeGrid).forEach(x => x.classList.toggle('active', x.getAttribute('data-preview') === t.id));
+        sound.click();
+        // Save to server if logged in
+        if (state.user) {
+          try {
+            await api('/api/users/me', { method: 'PUT', body: { theme: t.id } });
+          } catch {}
+        }
+      },
     },
-      h('div', {},
-        h('div', { style: 'font-weight:600' }, label),
-        description ? h('div', { style: 'font-size:0.85rem;color:var(--text-dim)' }, description) : null,
-      ),
-      h('input', { type: 'checkbox', checked: state.settings[key] ? '' : null, onchange: (e) => {
+      h('div', { class: 'theme-swatch' }),
+      h('div', { class: 'theme-name' }, t.name),
+    );
+    themeGrid.appendChild(opt);
+  });
+  themeSection.appendChild(themeGrid);
+  view.appendChild(themeSection);
+
+  // ===== Audio =====
+  const audioSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  audioSection.appendChild(h('h3', {}, 'Audio'));
+
+  const makeToggle = (label, description, key) => {
+    const row = h('div', { class: 'toggle-row' });
+    row.appendChild(h('div', {},
+      h('label', {}, label),
+      h('span', { class: 'desc' }, description),
+    ));
+    const switchEl = h('label', { class: 'switch' });
+    const input = h('input', {
+      type: 'checkbox',
+      ...(state.settings[key] ? { checked: '' } : {}),
+      onchange: (e) => {
         state.settings[key] = e.target.checked;
         saveSettings();
         if (key === 'sound' && e.target.checked) sound.click();
-      }}),
-    );
+      },
+    });
+    switchEl.appendChild(input);
+    switchEl.appendChild(h('span', { class: 'slider' }));
+    row.appendChild(switchEl);
     return row;
   };
 
-  view.appendChild(section('Audio',
-    h('div', {},
-      toggleRow('All sounds', 'sound', 'Master toggle for every sound effect'),
-      toggleRow('Move sounds', 'moveSound', 'Piece movement, capture, check, and checkmate cues'),
-      h('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' },
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.click() }, 'Test click'),
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.move() }, 'Test move'),
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.capture() }, 'Test capture'),
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.check() }, 'Test check'),
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.matchFound() }, 'Test match found'),
-        h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.victory() }, 'Test victory'),
-      ),
-    ),
+  audioSection.appendChild(makeToggle('All sounds', 'Master toggle for every sound effect', 'sound'));
+  audioSection.appendChild(makeToggle('Move sounds', 'Piece movement, capture, check, checkmate', 'moveSound'));
+  audioSection.appendChild(h('div', { style: 'margin-top:14px;display:flex;gap:8px;flex-wrap:wrap' },
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.click() }, 'Test click'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.move() }, 'Test move'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.capture() }, 'Test capture'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.check() }, 'Test check'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.matchFound() }, 'Test match found'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => sound.victory() }, 'Test victory'),
   ));
+  view.appendChild(audioSection);
 
-  view.appendChild(section('Account',
-    state.user
-      ? h('div', {},
-          h('p', {}, `Signed in as `, h('strong', {}, state.user.username)),
-          h('button', { class: 'btn btn-danger btn-sm', onclick: logout }, 'Sign out'),
-        )
-      : h('p', {}, 'Not signed in. ',
-          h('a', { href: '#/login', 'data-link': '' }, 'Sign in'), ' or ',
-          h('a', { href: '#/register', 'data-link': '' }, 'create an account'), '.'),
-  ));
+  // ===== Profile editor (if logged in) =====
+  if (state.user) {
+    const profileSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+    profileSection.appendChild(h('h3', {}, 'Profile'));
+    profileSection.appendChild(h('p', { style: 'margin-bottom:14px' }, 'Customize how others see you.'));
 
-  view.appendChild(section('About this build',
-    h('div', {},
-      h('p', { style: 'margin:0;font-size:0.9rem;color:var(--text-soft)' },
-        'Mischess v2 - vanilla JS frontend, Node.js + PostgreSQL backend, Stockfish engine for both play-vs-AI and anti-cheat analysis.'),
-    ),
-  ));
+    let bio = state.user.bio || '';
+    let country = state.user.country || '';
+    let title = state.user.title || '';
+
+    profileSection.appendChild(h('div', { class: 'form-group' },
+      h('label', {}, 'Bio'),
+      h('textarea', {
+        maxlength: '500',
+        placeholder: 'A short bio...',
+        rows: '3',
+        oninput: (e) => bio = e.target.value,
+      }, bio),
+    ));
+    profileSection.appendChild(h('div', { class: 'form-group' },
+      h('label', {}, 'Country code (optional, 2 letters)'),
+      h('input', {
+        type: 'text',
+        maxlength: '3',
+        placeholder: 'US',
+        value: country,
+        oninput: (e) => country = e.target.value.toUpperCase(),
+      }),
+    ));
+    profileSection.appendChild(h('div', { class: 'form-group' },
+      h('label', {}, 'Custom title (optional)'),
+      h('input', {
+        type: 'text',
+        maxlength: '30',
+        placeholder: 'e.g. Coffee Lover',
+        value: title,
+        oninput: (e) => title = e.target.value,
+      }),
+    ));
+    profileSection.appendChild(h('button', {
+      class: 'btn btn-primary',
+      onclick: async () => {
+        try {
+          await api('/api/users/me', {
+            method: 'PUT',
+            body: { bio, country: country || null, title: title || null },
+          });
+          Object.assign(state.user, { bio, country, title });
+          toast('Profile saved', 'success');
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      },
+    }, 'Save profile'));
+    view.appendChild(profileSection);
+  }
+
+  // ===== Account =====
+  const accountSection = h('div', { class: 'feature-card', style: 'margin-bottom:20px' });
+  accountSection.appendChild(h('h3', {}, 'Account'));
+  if (state.user) {
+    accountSection.appendChild(h('p', {}, `Signed in as `, h('strong', {}, state.user.username)));
+    accountSection.appendChild(h('button', { class: 'btn btn-danger btn-sm', onclick: logout }, 'Sign out'));
+  } else {
+    accountSection.appendChild(h('p', {}, 'Not signed in. ',
+      h('a', { href: '#/login', 'data-link': '' }, 'Sign in'), ' or ',
+      h('a', { href: '#/register', 'data-link': '' }, 'create an account'), '.'));
+  }
+  view.appendChild(accountSection);
 
   return view;
 });

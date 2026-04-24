@@ -4,6 +4,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { query, one } = require('../db/pool');
 const { hashPassword, verifyPassword, signToken, authMiddleware } = require('../auth');
+const { generateCsrfToken, setCsrfCookie } = require('../csrf');
 
 const router = express.Router();
 
@@ -51,14 +52,17 @@ router.post('/register', authLimiter, async (req, res) => {
     const row = await one(
       `INSERT INTO users (username, username_lower, email, email_lower, password_hash)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, username, email, rating_bullet, rating_blitz, rating_rapid, rating_classical,
+       RETURNING id, username, email, bio, country, title, theme, piece_set,
+                 rating_bullet, rating_blitz, rating_rapid, rating_classical,
                  games_played, wins, losses, draws, created_at`,
       [username, username.toLowerCase(), email || null, email ? email.toLowerCase() : null, hash]
     );
 
     const token = signToken({ id: row.id, username: row.username });
     setCookie(res, token);
-    res.json({ ok: true, token, user: row });
+    const csrf = generateCsrfToken();
+    setCsrfCookie(res, csrf);
+    res.json({ ok: true, token, csrf, user: row });
   } catch (e) {
     console.error('[register]', e);
     res.status(500).json({ error: 'Server error' });
@@ -72,6 +76,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const user = await one(
       `SELECT id, username, email, password_hash,
+              bio, country, title, theme, piece_set,
               rating_bullet, rating_blitz, rating_rapid, rating_classical,
               games_played, wins, losses, draws
        FROM users WHERE username_lower = $1`,
@@ -86,8 +91,10 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const token = signToken({ id: user.id, username: user.username });
     setCookie(res, token);
+    const csrf = generateCsrfToken();
+    setCsrfCookie(res, csrf);
     delete user.password_hash;
-    res.json({ ok: true, token, user });
+    res.json({ ok: true, token, csrf, user });
   } catch (e) {
     console.error('[login]', e);
     res.status(500).json({ error: 'Server error' });
@@ -96,18 +103,25 @@ router.post('/login', authLimiter, async (req, res) => {
 
 router.post('/logout', (req, res) => {
   res.clearCookie('token', { path: '/' });
+  res.clearCookie('csrf', { path: '/' });
   res.json({ ok: true });
 });
 
 router.get('/me', authMiddleware, async (req, res) => {
   const user = await one(
-    `SELECT id, username, email,
+    `SELECT id, username, email, bio, country, title, theme, piece_set,
             rating_bullet, rating_blitz, rating_rapid, rating_classical,
             games_played, wins, losses, draws, created_at
      FROM users WHERE id = $1`,
     [req.user.id]
   );
   if (!user) return res.status(404).json({ error: 'User not found' });
+  // Refresh CSRF if missing
+  if (!req.cookies?.csrf) {
+    const csrf = generateCsrfToken();
+    setCsrfCookie(res, csrf);
+    return res.json({ user, csrf });
+  }
   res.json({ user });
 });
 

@@ -226,6 +226,21 @@ async function handleMessage(ws, state, msg, dbUser) {
       return;
     }
 
+    case 'telemetry': {
+      const game = games.get(state.watchingGameId || msg.gameId);
+      if (!game) return;
+      const color = game.playerColor(state.userId);
+      if (!color) return;
+      const eventType = String(msg.event || '').slice(0, 40);
+      if (!eventType) return;
+      // Write to focus_events table with synthetic type name (reuses the table)
+      query(
+        `INSERT INTO focus_events (game_id, user_id, event_type) VALUES ($1, $2, $3)`,
+        [game.id, state.userId, 'ac:' + eventType]
+      ).catch(() => {});
+      return;
+    }
+
     default:
       send(ws, { type: 'error', error: 'Unknown message type' });
   }

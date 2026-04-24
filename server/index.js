@@ -17,6 +17,7 @@ const gameRoutes = require('./routes/games');
 const friendsRoutes = require('./routes/friends');
 const { initWebSocket } = require('./ws');
 const { startAnalysisQueue } = require('./anticheat');
+const { csrfMiddleware } = require('./csrf');
 
 const PORT = process.env.PORT || 3000;
 
@@ -54,6 +55,9 @@ async function boot() {
 
   const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 300 });
   app.use('/api/', globalLimiter);
+
+  // CSRF protection for state-changing API routes
+  app.use('/api/', csrfMiddleware);
 
   app.use('/api/auth', authRoutes);
   app.use('/api/users', userRoutes);
