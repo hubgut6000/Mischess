@@ -398,6 +398,9 @@ route('/login', async () => {
     const errBox = $('#err', form);
     errBox.textContent = '';
     try {
+      // Get fresh CSRF token before submitting
+      await fetch('/api/auth/me', { credentials: 'include' });
+      
       const { user, token } = await api('/api/auth/login', { method: 'POST', body: { username, password } });
       state.user = user;
       state.token = token;
@@ -435,6 +438,9 @@ route('/register', async () => {
     const errBox = $('#err', form);
     errBox.textContent = '';
     try {
+      // Get fresh CSRF token before submitting
+      await fetch('/api/auth/me', { credentials: 'include' });
+      
       const { user, token } = await api('/api/auth/register', { method: 'POST', body: { username, email, password } });
       state.user = user;
       state.token = token;
