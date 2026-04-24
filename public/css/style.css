@@ -528,7 +528,7 @@ p strong { color: var(--ink-1); font-weight: 600; }
   max-width: 400px;
   margin: 60px auto 0;
   position: relative;
-  animation: float 8s ease-in-out infinite;
+  animation: float 28s ease-in-out infinite;
 }
 @keyframes float {
   0%, 100% { transform: translateY(0); }
