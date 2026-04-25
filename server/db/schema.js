@@ -120,6 +120,102 @@ CREATE TABLE IF NOT EXISTS focus_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_focus_game ON focus_events(game_id);
+
+-- Per-move analysis cache. Populated by background analysis queue or on-demand.
+CREATE TABLE IF NOT EXISTS analysis_moves (
+  game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  ply INTEGER NOT NULL,
+  played_san TEXT NOT NULL,
+  best_move_san TEXT,
+  eval_before NUMERIC,
+  eval_after NUMERIC,
+  classification TEXT,
+  PRIMARY KEY (game_id, ply)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_game ON analysis_moves(game_id);
+
+-- Friend requests: pending/accepted/blocked
+CREATE TABLE IF NOT EXISTS friend_requests (
+  id SERIAL PRIMARY KEY,
+  from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  responded_at TIMESTAMPTZ,
+  UNIQUE (from_id, to_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_friend_req_to ON friend_requests(to_id, status);
+CREATE INDEX IF NOT EXISTS idx_friend_req_from ON friend_requests(from_id, status);
+
+-- Direct messages between users
+CREATE TABLE IF NOT EXISTS direct_messages (
+  id BIGSERIAL PRIMARY KEY,
+  from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_dm_pair ON direct_messages(from_id, to_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_dm_to ON direct_messages(to_id, read_at);
+
+-- Friend challenges (pending direct game offers)
+CREATE TABLE IF NOT EXISTS challenges (
+  id SERIAL PRIMARY KEY,
+  from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  initial_time INTEGER NOT NULL,
+  increment INTEGER NOT NULL DEFAULT 0,
+  rated BOOLEAN NOT NULL DEFAULT false,
+  color TEXT NOT NULL DEFAULT 'random',
+  status TEXT NOT NULL DEFAULT 'pending',
+  game_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_challenges_to ON challenges(to_id, status);
+
+-- Behavioral restrictions (resignation farming, account boosting, harassment)
+CREATE TABLE IF NOT EXISTS restrictions (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  active BOOLEAN NOT NULL DEFAULT true
+);
+
+CREATE INDEX IF NOT EXISTS idx_restrictions_user ON restrictions(user_id, active);
+
+-- Recent quick resigns (for resignation farming detection)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS recent_quick_resigns INTEGER NOT NULL DEFAULT 0;
+
+-- Boost detection: track repeat opponents and IP fingerprints
+CREATE TABLE IF NOT EXISTS pair_history (
+  user_a INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_b INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  games_count INTEGER NOT NULL DEFAULT 0,
+  recent_games TIMESTAMPTZ[] NOT NULL DEFAULT ARRAY[]::TIMESTAMPTZ[],
+  PRIMARY KEY (user_a, user_b),
+  CHECK (user_a < user_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pair_count ON pair_history(games_count);
+
+-- IP fingerprint for boost/multi-account detection
+CREATE TABLE IF NOT EXISTS user_ips (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ip_hash TEXT NOT NULL,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, ip_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_ips_hash ON user_ips(ip_hash);
 `;
 
 async function migrate(pool) {

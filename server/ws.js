@@ -4,10 +4,11 @@ const WebSocket = require('ws');
 const url = require('url');
 const { verifyToken } = require('./auth');
 const { query, one } = require('./db/pool');
-const { games, enqueue, leaveQueue, getUserActiveGame } = require('./gameManager');
+const { games, enqueue, leaveQueue, getUserActiveGame, createDirectGame } = require('./gameManager');
 
 const userSockets = new Map();
 const socketState = new WeakMap();
+const userToSocket = new Map(); // userId -> ws (for finding online users)
 
 function addSocket(userId, ws) {
   if (!userSockets.has(userId)) userSockets.set(userId, new Set());
@@ -57,6 +58,7 @@ function initWebSocket(server) {
       watchingGameId: null,
     };
     socketState.set(ws, state);
+    userToSocket.set(dbUser.id, ws);
     addSocket(dbUser.id, ws);
 
     send(ws, { type: 'connected', username: dbUser.username, userId: dbUser.id });
@@ -75,6 +77,8 @@ function initWebSocket(server) {
 
     ws.on('close', () => {
       removeSocket(state.userId, ws);
+      // Only remove userToSocket if this is still the registered ws (handles reconnects)
+      if (userToSocket.get(state.userId) === ws) userToSocket.delete(state.userId);
       leaveQueue(state.userId);
       if (state.watchingGameId) {
         const g = games.get(state.watchingGameId);
@@ -110,11 +114,30 @@ async function handleMessage(ws, state, msg, dbUser) {
       leaveQueue(state.userId);
       const it = clampInt(msg.initialTime, 60, 10800);
       const inc = clampInt(msg.increment, 0, 60);
-      const r = msg.rated !== false;
+      let r = msg.rated !== false;
 
       // Refresh user flagged status (may have changed mid-session)
       const fresh = await one('SELECT is_flagged, rating_bullet, rating_blitz, rating_rapid, rating_classical FROM users WHERE id = $1', [state.userId]);
       state.flagged = !!fresh.is_flagged;
+
+      // Check for active restrictions blocking rated play
+      if (r) {
+        const restriction = await one(
+          `SELECT reason, expires_at FROM restrictions
+           WHERE user_id = $1 AND active = true AND kind = 'no_rated'
+             AND (expires_at IS NULL OR expires_at > NOW())
+           ORDER BY created_at DESC LIMIT 1`,
+          [state.userId]
+        );
+        if (restriction) {
+          return send(ws, {
+            type: 'restricted',
+            reason: restriction.reason,
+            expires: restriction.expires_at,
+          });
+        }
+      }
+
       const cat = (it + 40 * inc < 180) ? 'rating_bullet'
         : (it + 40 * inc < 480) ? 'rating_blitz'
         : (it + 40 * inc < 1500) ? 'rating_rapid' : 'rating_classical';
@@ -142,6 +165,71 @@ async function handleMessage(ws, state, msg, dbUser) {
     case 'cancelSeek':
       leaveQueue(state.userId);
       return send(ws, { type: 'queueCancelled' });
+
+    case 'acceptChallenge': {
+      const challengeId = parseInt(msg.challengeId, 10);
+      if (!challengeId) return send(ws, { type: 'error', error: 'Invalid challenge id' });
+
+      const ch = await one(
+        `SELECT * FROM challenges
+         WHERE id = $1 AND to_id = $2 AND status = 'accepted'`,
+        [challengeId, state.userId]
+      );
+      if (!ch) return send(ws, { type: 'error', error: 'Challenge not found' });
+
+      // Find the challenger's WS connection
+      const challengerWs = userToSocket.get(ch.from_id);
+      if (!challengerWs || challengerWs.readyState !== 1) {
+        return send(ws, { type: 'error', error: 'Challenger is offline' });
+      }
+      const challengerState = socketState.get(challengerWs);
+      if (!challengerState) {
+        return send(ws, { type: 'error', error: 'Challenger session expired' });
+      }
+
+      // Decide colors
+      let whiteId, whiteWs, blackId, blackWs, whiteName, blackName;
+      const color = ch.color === 'random' ? (Math.random() < 0.5 ? 'white' : 'black') : ch.color;
+      // 'color' is from challenger's perspective
+      if (color === 'white') {
+        whiteId = ch.from_id; whiteWs = challengerWs; whiteName = challengerState.username;
+        blackId = ch.to_id; blackWs = ws; blackName = state.username;
+      } else {
+        whiteId = ch.to_id; whiteWs = ws; whiteName = state.username;
+        blackId = ch.from_id; blackWs = challengerWs; blackName = challengerState.username;
+      }
+
+      // Get ratings
+      const [whiteUser, blackUser] = await Promise.all([
+        one('SELECT rating_bullet, rating_blitz, rating_rapid, rating_classical FROM users WHERE id = $1', [whiteId]),
+        one('SELECT rating_bullet, rating_blitz, rating_rapid, rating_classical FROM users WHERE id = $1', [blackId]),
+      ]);
+      const it = ch.initial_time, inc = ch.increment;
+      const cat = (it + 40 * inc < 180) ? 'bullet'
+        : (it + 40 * inc < 480) ? 'blitz'
+        : (it + 40 * inc < 1500) ? 'rapid' : 'classical';
+      const whiteRating = whiteUser[`rating_${cat}`];
+      const blackRating = blackUser[`rating_${cat}`];
+
+      const game = createDirectGame({
+        whiteId, whiteName, whiteRating,
+        blackId, blackName, blackRating,
+        initialTime: ch.initial_time, increment: ch.increment, rated: ch.rated,
+      });
+      game.sockets.add(whiteWs);
+      game.sockets.add(blackWs);
+      const ws1 = socketState.get(whiteWs);
+      const ws2 = socketState.get(blackWs);
+      if (ws1) ws1.watchingGameId = game.id;
+      if (ws2) ws2.watchingGameId = game.id;
+
+      await query(`UPDATE challenges SET game_id = $1, status = 'completed' WHERE id = $2`,
+        [game.id, ch.id]);
+
+      send(whiteWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'white' });
+      send(blackWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'black' });
+      return;
+    }
 
     case 'move': {
       const game = games.get(state.watchingGameId || msg.gameId);

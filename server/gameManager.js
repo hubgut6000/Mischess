@@ -238,6 +238,9 @@ class GameSession {
       ]
     ).catch(err => console.error('[game save]', err));
 
+    // Behavioral checks (run after game saved)
+    this._runBehavioralChecks(termination).catch(err => console.error('[behavioral checks]', err));
+
     this.whiteRatingAfter = whiteRatingAfter;
     this.blackRatingAfter = blackRatingAfter;
 
@@ -255,6 +258,72 @@ class GameSession {
     const r = row[`rating_${this.category}`];
     if (r >= 2400) return 16;
     return 20;
+  }
+
+  /**
+   * Behavioral checks run after a game ends:
+   * - Quick-resign tracking (resignation farming)
+   * - Pair-history tracking (boost detection)
+   */
+  async _runBehavioralChecks(termination) {
+    const moveCount = this.core.history().length;
+
+    // Quick-resign detection: rated game, resignation under 10 plies (5 full moves)
+    if (this.rated && termination === 'resignation' && moveCount < 10) {
+      const loserId = this.winner === 'white' ? this.blackId : this.whiteId;
+      if (loserId) {
+        try {
+          const updated = await one(
+            `UPDATE users SET recent_quick_resigns = recent_quick_resigns + 1
+             WHERE id = $1 RETURNING recent_quick_resigns`,
+            [loserId]
+          );
+          const count = updated?.recent_quick_resigns || 0;
+          if (count >= 5) {
+            // Restrict from rated play for 24 hours
+            await query(
+              `INSERT INTO restrictions (user_id, kind, reason, expires_at)
+               VALUES ($1, 'no_rated', $2, NOW() + INTERVAL '24 hours')
+               ON CONFLICT DO NOTHING`,
+              [loserId, `Repeated quick resignations (${count} in a row)`]
+            );
+            console.log(`[behavioral] User ${loserId} restricted: ${count} quick resigns`);
+          }
+        } catch (e) {
+          console.error('[quick resign tracking]', e);
+        }
+      }
+    } else if (termination !== 'aborted' && this.rated && moveCount >= 10) {
+      // Reset quick-resign counter on a normal-length game
+      const loserId = this.winner === 'white' ? this.blackId : (this.winner === 'black' ? this.whiteId : null);
+      if (loserId) {
+        await query(`UPDATE users SET recent_quick_resigns = 0 WHERE id = $1`, [loserId])
+          .catch(() => {});
+      }
+    }
+
+    // Pair-history: track for boost detection
+    if (this.rated && this.whiteId && this.blackId && termination !== 'aborted') {
+      const [a, b] = this.whiteId < this.blackId
+        ? [this.whiteId, this.blackId]
+        : [this.blackId, this.whiteId];
+      try {
+        await query(
+          `INSERT INTO pair_history (user_a, user_b, games_count, recent_games)
+           VALUES ($1, $2, 1, ARRAY[NOW()]::TIMESTAMPTZ[])
+           ON CONFLICT (user_a, user_b) DO UPDATE
+           SET games_count = pair_history.games_count + 1,
+               recent_games = (
+                 SELECT ARRAY_AGG(t)
+                 FROM unnest(array_append(pair_history.recent_games, NOW())) t
+                 WHERE t > NOW() - INTERVAL '7 days'
+               )`,
+          [a, b]
+        );
+      } catch (e) {
+        console.error('[pair history]', e);
+      }
+    }
   }
 
   snapshot() {
@@ -341,8 +410,20 @@ function getUserActiveGame(userId) {
   return games.get(gid) || null;
 }
 
+function createDirectGame(opts) {
+  const game = new GameSession({
+    whiteId: opts.whiteId, whiteName: opts.whiteName, whiteRating: opts.whiteRating,
+    blackId: opts.blackId, blackName: opts.blackName, blackRating: opts.blackRating,
+    initialTime: opts.initialTime, increment: opts.increment, rated: opts.rated,
+  });
+  games.set(game.id, game);
+  if (opts.whiteId) userGame.set(opts.whiteId, game.id);
+  if (opts.blackId) userGame.set(opts.blackId, game.id);
+  return game;
+}
+
 module.exports = {
   games, userGame, queues,
   enqueue, leaveQueue, getUserActiveGame,
-  GameSession,
+  GameSession, createDirectGame,
 };

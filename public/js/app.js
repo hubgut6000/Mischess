@@ -287,6 +287,26 @@ function onWsMessage(ev) {
       toast(msg.error, 'error');
       if (state.board && state.game) state.board.setPosition(state.game.fen);
       break;
+    case 'restricted': {
+      sound.error();
+      onQueueCancelled();
+      const expires = msg.expires ? new Date(msg.expires).toLocaleString() : 'until reviewed';
+      toast(`Rated play restricted: ${msg.reason}. Expires ${expires}`, 'error');
+      break;
+    }
+    case 'challengeReceived':
+      sound.matchFound();
+      toast(`${msg.from} challenged you to a game! Check your challenges page.`, 'info');
+      break;
+    case 'challengeAccepted':
+      // Server will follow up with gameStart
+      toast(`${msg.username} accepted your challenge`, 'success');
+      break;
+    case 'newMessage':
+      // From DM partner
+      sound.click();
+      toast(`New message from ${msg.from}`, 'info');
+      break;
     case 'error':
       toast(msg.error, 'error');
       break;
@@ -1292,23 +1312,277 @@ function ratingCard(cat, val) {
 }
 
 // FRIENDS LIST
+// FRIENDS / REQUESTS / CHALLENGES
 route('/friends', async () => {
   if (!state.user) { navigate('#/login'); return null; }
   const view = h('div');
+  view.appendChild(h('span', { class: 'kicker' }, 'Your circle'));
   view.appendChild(h('h1', {}, 'Friends'));
-  const list = h('div', { class: 'games-list' });
+
+  // Tabs
+  let activeTab = 'friends';
+  const tabsEl = h('div', { class: 'lb-tabs', style: 'margin-bottom:24px' });
+  const contentEl = h('div');
+  view.appendChild(tabsEl);
+  view.appendChild(contentEl);
+
+  const tabs = [
+    { id: 'friends', label: 'Friends' },
+    { id: 'requests', label: 'Requests' },
+    { id: 'challenges', label: 'Challenges' },
+    { id: 'add', label: 'Add' },
+  ];
+  tabs.forEach(t => {
+    tabsEl.appendChild(h('button', {
+      class: 'lb-tab' + (t.id === activeTab ? ' active' : ''),
+      onclick: () => { activeTab = t.id; renderTab(); },
+    }, t.label));
+  });
+
+  async function renderTab() {
+    $$('.lb-tab', tabsEl).forEach((b, i) => b.classList.toggle('active', tabs[i].id === activeTab));
+    contentEl.innerHTML = '';
+    contentEl.appendChild(h('div', { class: 'loading' }, h('div', { class: 'spinner' })));
+    try {
+      if (activeTab === 'friends') {
+        const { friends } = await api('/api/friends');
+        contentEl.innerHTML = '';
+        if (!friends.length) {
+          contentEl.appendChild(h('p', { class: 'text-dim' }, 'No friends yet. Use the Add tab to send a friend request.'));
+          return;
+        }
+        const list = h('div', { class: 'friend-list' });
+        for (const f of friends) {
+          const isOnline = f.last_seen && (Date.now() - new Date(f.last_seen).getTime() < 5 * 60 * 1000);
+          list.appendChild(h('div', { class: 'friend-item' },
+            h('div', { class: 'avatar-sm' }, f.username[0].toUpperCase()),
+            h('div', { class: 'meta' },
+              h('div', { class: 'name' },
+                h('span', { class: 'online-dot' + (isOnline ? ' online' : '') }),
+                f.username,
+                f.title ? h('span', { class: 'title-badge' }, f.title) : null,
+              ),
+              h('div', { class: 'status' }, `Blitz ${f.rating_blitz} · Rapid ${f.rating_rapid}`),
+            ),
+            h('div', { class: 'actions' },
+              h('a', { class: 'btn btn-outline btn-sm', href: `#/messages/${f.username}`, 'data-link': '' }, 'Message'),
+              h('button', { class: 'btn btn-primary btn-sm', onclick: () => challengeFriend(f.username) }, 'Challenge'),
+              h('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                if (!confirm(`Remove ${f.username} as a friend?`)) return;
+                try {
+                  await api('/api/friends/' + encodeURIComponent(f.username), { method: 'DELETE' });
+                  toast('Removed', 'success');
+                  renderTab();
+                } catch (e) { toast(e.message, 'error'); }
+              }}, 'Remove'),
+            ),
+          ));
+        }
+        contentEl.appendChild(list);
+      } else if (activeTab === 'requests') {
+        const { incoming, outgoing } = await api('/api/friends/requests');
+        contentEl.innerHTML = '';
+        contentEl.appendChild(h('h3', { style: 'margin-top:0' }, `Incoming (${incoming.length})`));
+        if (!incoming.length) contentEl.appendChild(h('p', { class: 'text-dim' }, 'No pending requests.'));
+        const incList = h('div', { class: 'friend-list' });
+        for (const r of incoming) {
+          incList.appendChild(h('div', { class: 'friend-item' },
+            h('div', { class: 'avatar-sm' }, r.username[0].toUpperCase()),
+            h('div', { class: 'meta' },
+              h('div', { class: 'name' }, r.username),
+              h('div', { class: 'status' }, `Sent ${new Date(r.created_at).toLocaleDateString()}`),
+            ),
+            h('div', { class: 'actions' },
+              h('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
+                try {
+                  await api(`/api/friends/requests/${r.id}/accept`, { method: 'POST' });
+                  toast(`You're now friends with ${r.username}`, 'success');
+                  renderTab();
+                } catch (e) { toast(e.message, 'error'); }
+              }}, 'Accept'),
+              h('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try {
+                  await api(`/api/friends/requests/${r.id}/decline`, { method: 'POST' });
+                  renderTab();
+                } catch (e) { toast(e.message, 'error'); }
+              }}, 'Decline'),
+            ),
+          ));
+        }
+        contentEl.appendChild(incList);
+
+        contentEl.appendChild(h('h3', { style: 'margin-top:32px' }, `Outgoing (${outgoing.length})`));
+        if (!outgoing.length) contentEl.appendChild(h('p', { class: 'text-dim' }, 'No outgoing requests.'));
+        const outList = h('div', { class: 'friend-list' });
+        for (const r of outgoing) {
+          outList.appendChild(h('div', { class: 'friend-item' },
+            h('div', { class: 'avatar-sm' }, r.username[0].toUpperCase()),
+            h('div', { class: 'meta' },
+              h('div', { class: 'name' }, r.username),
+              h('div', { class: 'status' }, 'Pending...'),
+            ),
+          ));
+        }
+        contentEl.appendChild(outList);
+      } else if (activeTab === 'challenges') {
+        const { incoming } = await api('/api/friends/challenges');
+        contentEl.innerHTML = '';
+        if (!incoming.length) {
+          contentEl.appendChild(h('p', { class: 'text-dim' }, 'No pending challenges.'));
+          return;
+        }
+        const list = h('div', { class: 'friend-list' });
+        for (const c of incoming) {
+          list.appendChild(h('div', { class: 'friend-item' },
+            h('div', { class: 'avatar-sm' }, c.username[0].toUpperCase()),
+            h('div', { class: 'meta' },
+              h('div', { class: 'name' }, `${c.username} challenged you`),
+              h('div', { class: 'status' },
+                `${Math.floor(c.initial_time / 60)}+${c.increment} · ${c.rated ? 'rated' : 'casual'} · ${c.color}`),
+            ),
+            h('div', { class: 'actions' },
+              h('button', { class: 'btn btn-primary btn-sm', onclick: async () => {
+                try {
+                  const res = await api(`/api/friends/challenges/${c.id}/accept`, { method: 'POST' });
+                  // Server creates game via WS - send acceptance event
+                  await ensureWs();
+                  sendWs({ type: 'acceptChallenge', challengeId: c.id });
+                  toast('Challenge accepted, starting game...', 'success');
+                } catch (e) { toast(e.message, 'error'); }
+              }}, 'Accept'),
+              h('button', { class: 'btn btn-ghost btn-sm', onclick: async () => {
+                try {
+                  await api(`/api/friends/challenges/${c.id}/decline`, { method: 'POST' });
+                  renderTab();
+                } catch (e) { toast(e.message, 'error'); }
+              }}, 'Decline'),
+            ),
+          ));
+        }
+        contentEl.appendChild(list);
+      } else if (activeTab === 'add') {
+        contentEl.innerHTML = '';
+        contentEl.appendChild(h('p', {}, 'Send a friend request by username.'));
+        let username = '';
+        const form = h('form', { onsubmit: async (e) => {
+          e.preventDefault();
+          if (!username) return;
+          try {
+            await api('/api/friends/requests', { method: 'POST', body: { username } });
+            toast(`Friend request sent to ${username}`, 'success');
+            username = '';
+            $('input', form).value = '';
+          } catch (err) { toast(err.message, 'error'); }
+        }, style: 'display:flex;gap:10px;align-items:flex-end;max-width:480px' },
+          h('div', { class: 'form-group', style: 'flex:1;margin:0' },
+            h('label', {}, 'Username'),
+            h('input', { type: 'text', placeholder: 'their_username', oninput: (e) => username = e.target.value.trim() }),
+          ),
+          h('button', { class: 'btn btn-primary', type: 'submit' }, 'Send request'),
+        );
+        contentEl.appendChild(form);
+      }
+    } catch (e) {
+      contentEl.innerHTML = '';
+      contentEl.appendChild(h('p', { class: 'toast error' }, e.message));
+    }
+  }
+
+  renderTab();
+  return view;
+});
+
+async function challengeFriend(username) {
+  // Show modal with time controls
+  const backdrop = h('div', { class: 'modal-backdrop', onclick: (e) => {
+    if (e.target === backdrop) backdrop.remove();
+  }});
+  let initialTime = 300, increment = 0, rated = true, color = 'random';
+  const modal = h('div', { class: 'modal' });
+  modal.appendChild(h('h2', {}, `Challenge ${username}`));
+  modal.appendChild(h('p', {}, 'Pick time and settings.'));
+
+  const TC = [
+    { it: 60, inc: 0, label: '1+0' }, { it: 180, inc: 0, label: '3+0' },
+    { it: 180, inc: 2, label: '3+2' }, { it: 300, inc: 0, label: '5+0' },
+    { it: 300, inc: 3, label: '5+3' }, { it: 600, inc: 0, label: '10+0' },
+    { it: 900, inc: 10, label: '15+10' }, { it: 1800, inc: 0, label: '30+0' },
+  ];
+  const tcGrid = h('div', { class: 'tc-grid', style: 'margin:14px 0' });
+  TC.forEach(t => {
+    const c = h('div', { class: 'tc-card' + (t.it === 300 && t.inc === 0 ? ' selected' : ''),
+      onclick: () => {
+        initialTime = t.it; increment = t.inc;
+        $$('.tc-card', tcGrid).forEach(x => x.classList.remove('selected'));
+        c.classList.add('selected');
+      } },
+      h('div', { class: 'tc-time' }, t.label),
+    );
+    tcGrid.appendChild(c);
+  });
+  modal.appendChild(tcGrid);
+
+  modal.appendChild(h('div', { class: 'play-options-row' },
+    h('button', { class: 'btn btn-primary btn-sm', id: 'rb', onclick: () => {
+      rated = true;
+      $('#rb', modal).className = 'btn btn-primary btn-sm';
+      $('#cb', modal).className = 'btn btn-outline btn-sm';
+    }}, 'Rated'),
+    h('button', { class: 'btn btn-outline btn-sm', id: 'cb', onclick: () => {
+      rated = false;
+      $('#cb', modal).className = 'btn btn-primary btn-sm';
+      $('#rb', modal).className = 'btn btn-outline btn-sm';
+    }}, 'Casual'),
+  ));
+
+  modal.appendChild(h('div', { class: 'modal-actions' },
+    h('button', { class: 'btn btn-ghost', onclick: () => backdrop.remove() }, 'Cancel'),
+    h('button', { class: 'btn btn-primary', onclick: async () => {
+      try {
+        await api('/api/friends/challenges', {
+          method: 'POST',
+          body: { username, initialTime, increment, rated, color },
+        });
+        toast(`Challenge sent to ${username}`, 'success');
+        backdrop.remove();
+      } catch (e) { toast(e.message, 'error'); }
+    }}, 'Send challenge'),
+  ));
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+}
+
+// MESSAGES (DMs)
+route('/messages', async () => {
+  if (!state.user) { navigate('#/login'); return null; }
+  const view = h('div');
+  view.appendChild(h('span', { class: 'kicker' }, 'Direct'));
+  view.appendChild(h('h1', {}, 'Messages'));
+  view.appendChild(h('p', { class: 'lead' }, 'You can message anyone you\'re friends with.'));
+  const list = h('div', { class: 'friend-list', style: 'margin-top:24px' });
   view.appendChild(list);
   try {
-    const { friends } = await api('/api/friends');
-    if (!friends.length) list.appendChild(h('p', { style: 'color:var(--text-dim)' }, 'No friends yet. Visit a profile to add one.'));
-    for (const f of friends) {
-      list.appendChild(h('div', { class: 'game-list-item' },
-        h('div', {}, h('a', { href: `#/profile/${f.username}`, 'data-link': '' }, f.username)),
-        h('div', { class: 'gl-tc' }, `${f.rating_blitz}`),
-        h('button', { class: 'btn btn-danger btn-sm', onclick: async () => {
-          await api('/api/friends/' + f.username, { method: 'DELETE' });
-          renderRoute();
-        }}, 'Remove'),
+    const { conversations } = await api('/api/friends/messages');
+    if (!conversations.length) {
+      list.appendChild(h('p', { class: 'text-dim' }, 'No conversations yet. Visit Friends to start one.'));
+      return view;
+    }
+    for (const c of conversations) {
+      list.appendChild(h('a', {
+        class: 'friend-item',
+        href: `#/messages/${c.username}`,
+        'data-link': '',
+        style: 'text-decoration:none;color:inherit',
+      },
+        h('div', { class: 'avatar-sm' }, c.username[0].toUpperCase()),
+        h('div', { class: 'meta' },
+          h('div', { class: 'name' }, c.username),
+          h('div', { class: 'status', style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' },
+            (c.mine ? 'You: ' : '') + c.body),
+        ),
+        h('div', { class: 'text-dim', style: 'font-size:0.78rem' },
+          new Date(c.created_at).toLocaleDateString()),
       ));
     }
   } catch (e) {
@@ -1316,6 +1590,170 @@ route('/friends', async () => {
   }
   return view;
 });
+
+route('/messages/:username', async (params) => {
+  if (!state.user) { navigate('#/login'); return null; }
+  const view = h('div');
+  const username = params.username;
+  view.appendChild(h('div', { style: 'display:flex;align-items:center;gap:12px;margin-bottom:20px' },
+    h('a', { href: '#/messages', 'data-link': '', class: 'btn btn-ghost btn-sm' }, '← All'),
+    h('h1', { style: 'margin:0' }, username),
+  ));
+
+  const conv = h('div', { class: 'side-card', style: 'display:flex;flex-direction:column;height:65vh' });
+  const messagesEl = h('div', { class: 'dm-messages' });
+  const inputEl = h('input', { placeholder: 'Type a message...', maxlength: '1000' });
+  const formEl = h('form', { class: 'dm-input-row', onsubmit: async (e) => {
+    e.preventDefault();
+    const body = inputEl.value.trim();
+    if (!body) return;
+    try {
+      const { message } = await api(`/api/friends/messages/${encodeURIComponent(username)}`, {
+        method: 'POST', body: { body },
+      });
+      messagesEl.appendChild(renderDmMessage(message, true));
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      inputEl.value = '';
+    } catch (err) { toast(err.message, 'error'); }
+  }});
+  formEl.appendChild(inputEl);
+  formEl.appendChild(h('button', { class: 'btn btn-primary', type: 'submit' }, 'Send'));
+  conv.appendChild(messagesEl);
+  conv.appendChild(formEl);
+  view.appendChild(conv);
+
+  try {
+    const { messages } = await api('/api/friends/messages/' + encodeURIComponent(username));
+    for (const m of messages) {
+      const mine = m.from_id === state.user.id;
+      messagesEl.appendChild(renderDmMessage(m, mine));
+    }
+    setTimeout(() => { messagesEl.scrollTop = messagesEl.scrollHeight; }, 50);
+  } catch (e) {
+    messagesEl.appendChild(h('p', { class: 'toast error' }, e.message));
+  }
+  return view;
+});
+
+function renderDmMessage(m, mine) {
+  return h('div', { class: 'dm-message' + (mine ? ' mine' : '') },
+    h('div', {}, m.body),
+    h('div', { class: 'time' }, new Date(m.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })),
+  );
+}
+
+// ANALYSIS (post-game review)
+route('/analysis/:id', async (params) => {
+  const view = h('div');
+  view.appendChild(h('div', { style: 'display:flex;align-items:center;gap:12px;margin-bottom:20px' },
+    h('a', { href: `#/game/${params.id}`, 'data-link': '', class: 'btn btn-ghost btn-sm' }, '← Game'),
+    h('h1', { style: 'margin:0' }, 'Game review'),
+  ));
+  const loading = h('div', { class: 'loading' }, h('div', { class: 'spinner' }));
+  view.appendChild(loading);
+  try {
+    const { game, analysis, queued } = await api(`/api/games/${params.id}/analysis`);
+    view.removeChild(loading);
+
+    // Summary
+    const summary = h('div', { class: 'analysis-summary' });
+    if (game.white_acpl != null || game.black_acpl != null) {
+      const stats = computeMoveStats(analysis, 'white');
+      const bstats = computeMoveStats(analysis, 'black');
+      summary.appendChild(buildAnalysisStat(game.white_name || 'White', game.white_accuracy, game.white_acpl, stats));
+      summary.appendChild(buildAnalysisStat(game.black_name || 'Black', game.black_accuracy, game.black_acpl, bstats));
+    }
+    view.appendChild(summary);
+
+    if (queued || !analysis.length) {
+      view.appendChild(h('p', { class: 'text-dim' },
+        'Analysis is being processed in the background. Check back in a minute.'));
+      return view;
+    }
+
+    // Move-by-move list
+    const movesCard = h('div', { class: 'side-card', style: 'margin-top:20px' });
+    movesCard.appendChild(h('div', { class: 'side-card-header' }, h('h4', {}, 'Move-by-move')));
+    const movesBody = h('div', { class: 'side-card-body' });
+    const tbl = h('table', { class: 'leaderboard-table', style: 'width:100%' });
+    tbl.appendChild(h('thead', {}, h('tr', {},
+      h('th', {}, '#'),
+      h('th', {}, 'Played'),
+      h('th', {}, 'Best'),
+      h('th', {}, 'Eval before'),
+      h('th', {}, 'Eval after'),
+      h('th', {}, ''),
+    )));
+    const tbody = h('tbody');
+    for (const m of analysis) {
+      const cls = m.classification || '';
+      tbody.appendChild(h('tr', {},
+        h('td', {}, String(Math.ceil(m.ply / 2))),
+        h('td', { class: 'mono' }, m.played_san),
+        h('td', { class: 'mono', style: 'color:var(--ink-3)' }, m.best_move_san || '—'),
+        h('td', { class: 'mono' }, formatEval(m.eval_before)),
+        h('td', { class: 'mono' }, formatEval(m.eval_after)),
+        h('td', { style: `color:${classColor(cls)};font-weight:600;text-transform:capitalize` }, cls),
+      ));
+    }
+    tbl.appendChild(tbody);
+    movesBody.appendChild(tbl);
+    movesCard.appendChild(movesBody);
+    view.appendChild(movesCard);
+  } catch (e) {
+    view.removeChild(loading);
+    view.appendChild(h('p', { class: 'toast error' }, e.message));
+  }
+  return view;
+});
+
+function computeMoveStats(analysis, color) {
+  const counts = { brilliant: 0, good: 0, inaccuracy: 0, mistake: 0, blunder: 0 };
+  for (const m of analysis) {
+    const isWhite = m.ply % 2 === 1; // ply 1 = white, 2 = black
+    if ((color === 'white') !== isWhite) continue;
+    if (counts[m.classification] != null) counts[m.classification]++;
+  }
+  return counts;
+}
+
+function buildAnalysisStat(name, accuracy, acpl, counts) {
+  const card = h('div', { class: 'analysis-stat' });
+  card.appendChild(h('div', { class: 'player-name' }, name));
+  card.appendChild(h('div', { class: 'accuracy-value' }, accuracy != null ? `${Math.round(accuracy)}%` : '—'));
+  card.appendChild(h('div', { class: 'accuracy-label' }, `Accuracy${acpl != null ? ` · ACPL ${Math.round(acpl)}` : ''}`));
+  if (counts) {
+    const grid = h('div', { class: 'move-counts' });
+    grid.appendChild(h('div', { class: 'move-count-item good' },
+      h('div', { class: 'num' }, String(counts.good)),
+      h('div', {}, 'Good')));
+    grid.appendChild(h('div', { class: 'move-count-item inaccuracy' },
+      h('div', { class: 'num' }, String(counts.inaccuracy)),
+      h('div', {}, '?!')));
+    grid.appendChild(h('div', { class: 'move-count-item mistake' },
+      h('div', { class: 'num' }, String(counts.mistake)),
+      h('div', {}, '?')));
+    grid.appendChild(h('div', { class: 'move-count-item blunder' },
+      h('div', { class: 'num' }, String(counts.blunder)),
+      h('div', {}, '??')));
+    card.appendChild(grid);
+  }
+  return card;
+}
+
+function formatEval(e) {
+  if (e == null) return '—';
+  const n = Number(e);
+  if (Math.abs(n) > 100) return n > 0 ? `M${Math.ceil(n - 100)}` : `-M${Math.ceil(-n - 100)}`;
+  return (n >= 0 ? '+' : '') + n.toFixed(2);
+}
+
+function classColor(c) {
+  return {
+    brilliant: '#5fc6f2', good: 'var(--positive)',
+    inaccuracy: 'var(--caution)', mistake: '#e09a5e', blunder: 'var(--negative)',
+  }[c] || 'var(--ink-2)';
+}
 
 // GAME
 route('/game/:id', async (params) => {
@@ -1345,45 +1783,166 @@ route('/game/:id', async (params) => {
 function renderFinishedGame(game) {
   const view = h('div', { class: 'game-page' });
   const boardCol = h('div', { class: 'game-board-col' });
-  boardCol.appendChild(h('div', { class: 'player-strip' },
-    h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, game.black_name),
-      h('span', { class: 'rating' }, String(game.black_rating_after || game.black_rating_before || '')),
-    ),
-  ));
-  const boardEl = h('div');
-  boardCol.appendChild(boardEl);
-  boardCol.appendChild(h('div', { class: 'player-strip' },
-    h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, game.white_name),
-      h('span', { class: 'rating' }, String(game.white_rating_after || game.white_rating_before || '')),
-    ),
-  ));
 
-  const sideCol = h('div', { class: 'game-side-col' });
-  sideCol.appendChild(h('div', { class: "card" },
-    h('h3', {}, `${game.result || '?'} — ${game.termination}`),
-    h('p', {}, `${game.category} - ${game.time_control}`),
-    game.white_rating_after && game.white_rating_before ? h('p', {},
-      `${game.white_name}: ${game.white_rating_before} → ${game.white_rating_after}`) : null,
-    game.black_rating_after && game.black_rating_before ? h('p', {},
-      `${game.black_name}: ${game.black_rating_before} → ${game.black_rating_after}`) : null,
-  ));
-  const movesEl = h('div', { class: 'move-list' }, h('div', { class: 'moves' }));
-  sideCol.appendChild(movesEl);
-
-  view.appendChild(boardCol);
-  view.appendChild(sideCol);
-
-  const board = new Board(boardEl, { interactive: false });
-  const chess = new window.Chess();
+  // Parse moves
   let history = [];
   try {
     if (game.moves) history = JSON.parse(game.moves);
   } catch {}
+
+  // Build chess instance with full game replayed
+  const chess = new window.Chess();
   for (const m of history) chess.move(m);
-  board.setPosition(chess.fen());
-  renderMoveList(movesEl, chess.fen(), history);
+
+  // Track current ply for navigation
+  let currentPly = history.length; // start at end
+
+  // Player strips with avatars
+  const topStrip = h('div', { class: 'player-strip' },
+    h('div', { class: 'player-info' },
+      h('div', { class: 'avatar' }, (game.black_name || '?')[0].toUpperCase()),
+      h('div', { class: 'name-block' },
+        h('div', { class: 'name' }, game.black_name || 'Black'),
+        h('div', { class: 'rating' }, String(game.black_rating_after || game.black_rating_before || '')),
+      ),
+    ),
+    game.black_acpl != null ? h('div', { style: 'text-align:right' },
+      h('div', { style: 'font-family:var(--font-mono);font-size:0.85rem;color:var(--accent)' },
+        `${Math.round(game.black_accuracy || 0)}% acc`),
+      h('div', { style: 'font-family:var(--font-mono);font-size:0.75rem;color:var(--ink-3)' },
+        `ACPL ${Math.round(game.black_acpl)}`),
+    ) : null,
+  );
+  const boardEl = h('div');
+  const botStrip = h('div', { class: 'player-strip' },
+    h('div', { class: 'player-info' },
+      h('div', { class: 'avatar' }, (game.white_name || '?')[0].toUpperCase()),
+      h('div', { class: 'name-block' },
+        h('div', { class: 'name' }, game.white_name || 'White'),
+        h('div', { class: 'rating' }, String(game.white_rating_after || game.white_rating_before || '')),
+      ),
+    ),
+    game.white_acpl != null ? h('div', { style: 'text-align:right' },
+      h('div', { style: 'font-family:var(--font-mono);font-size:0.85rem;color:var(--accent)' },
+        `${Math.round(game.white_accuracy || 0)}% acc`),
+      h('div', { style: 'font-family:var(--font-mono);font-size:0.75rem;color:var(--ink-3)' },
+        `ACPL ${Math.round(game.white_acpl)}`),
+    ) : null,
+  );
+  boardCol.appendChild(topStrip);
+  boardCol.appendChild(boardEl);
+  boardCol.appendChild(botStrip);
+
+  // Replay control bar
+  const controls = h('div', { class: 'replay-controls' },
+    h('button', { class: 'btn btn-outline btn-sm', title: 'First move (Home)', onclick: () => goToPly(0) }, '⏮'),
+    h('button', { class: 'btn btn-outline btn-sm', title: 'Previous (←)', onclick: () => goToPly(currentPly - 1) }, '◀'),
+    h('button', { class: 'btn btn-outline btn-sm', title: 'Next (→)', onclick: () => goToPly(currentPly + 1) }, '▶'),
+    h('button', { class: 'btn btn-outline btn-sm', title: 'Last move (End)', onclick: () => goToPly(history.length) }, '⏭'),
+    h('div', { style: 'flex:1' }),
+    h('button', { class: 'btn btn-primary btn-sm', onclick: () => navigate(`#/analysis/${game.id}`) }, '🔍 Analyze'),
+  );
+  boardCol.appendChild(controls);
+
+  // Side col
+  const sideCol = h('div', { class: 'game-side-col' });
+
+  // Result card
+  const resultCard = h('div', { class: 'side-card' });
+  const winnerName = game.result === '1-0' ? game.white_name : (game.result === '0-1' ? game.black_name : null);
+  resultCard.appendChild(h('div', { class: 'side-card-header' },
+    h('h4', {}, winnerName ? `${winnerName} won` : (game.result === '1/2-1/2' ? 'Draw' : 'Game ended')),
+    h('span', { style: 'font-family:var(--font-mono);font-size:0.78rem;color:var(--ink-3)' }, game.result || '?'),
+  ));
+  const resBody = h('div', { class: 'side-card-body' });
+  resBody.appendChild(h('p', { style: 'margin:0 0 8px;color:var(--ink-2)' }, game.termination || ''));
+  resBody.appendChild(h('p', { style: 'margin:0;font-size:0.85rem;color:var(--ink-3)' },
+    `${game.category} · ${game.time_control}${game.rated ? ' · rated' : ' · casual'}`));
+  if (game.white_rating_after && game.white_rating_before) {
+    const wDiff = game.white_rating_after - game.white_rating_before;
+    const bDiff = (game.black_rating_after || 0) - (game.black_rating_before || 0);
+    resBody.appendChild(h('div', { style: 'margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.85rem' },
+      h('div', {},
+        h('div', { style: 'color:var(--ink-3)' }, game.white_name),
+        h('div', { style: 'font-family:var(--font-mono)' },
+          `${game.white_rating_before} → ${game.white_rating_after} `,
+          h('span', { style: `color:${wDiff > 0 ? 'var(--positive)' : 'var(--negative)'}` },
+            `${wDiff > 0 ? '+' : ''}${wDiff}`)),
+      ),
+      h('div', {},
+        h('div', { style: 'color:var(--ink-3)' }, game.black_name),
+        h('div', { style: 'font-family:var(--font-mono)' },
+          `${game.black_rating_before} → ${game.black_rating_after} `,
+          h('span', { style: `color:${bDiff > 0 ? 'var(--positive)' : 'var(--negative)'}` },
+            `${bDiff > 0 ? '+' : ''}${bDiff}`)),
+      ),
+    ));
+  }
+  resultCard.appendChild(resBody);
+  sideCol.appendChild(resultCard);
+
+  // Moves card
+  const movesCard = h('div', { class: 'side-card' });
+  movesCard.appendChild(h('div', { class: 'side-card-header' }, h('h4', {}, `Moves (${history.length})`)));
+  const movesEl = h('div', { class: 'move-list' }, h('div', { class: 'moves' }));
+  movesCard.appendChild(movesEl);
+  sideCol.appendChild(movesCard);
+
+  view.appendChild(boardCol);
+  view.appendChild(sideCol);
+
+  // Build board
+  const board = new Board(boardEl, { interactive: false });
+
+  function goToPly(ply) {
+    ply = Math.max(0, Math.min(history.length, ply));
+    currentPly = ply;
+    const c = new window.Chess();
+    for (let i = 0; i < ply; i++) c.move(history[i]);
+    board.chess = c;
+    if (ply > 0) {
+      const m = c.history({ verbose: true })[ply - 1];
+      if (m) board.setLastMove(m.from, m.to);
+    } else {
+      board.setLastMove(null, null);
+    }
+    board.render();
+    // Update move list highlights
+    $$('.moves .move', movesEl).forEach((el, idx) => {
+      el.classList.toggle('current', idx === ply - 1);
+    });
+    // Scroll current move into view
+    const cur = movesEl.querySelector('.move.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  // Render move list with click-to-navigate
+  const movesContainer = movesEl.querySelector('.moves');
+  for (let i = 0; i < history.length; i += 2) {
+    const pair = h('div', { class: 'move-pair' },
+      h('div', { class: 'move-number' }, `${(i / 2) + 1}.`),
+      h('div', { class: 'move', onclick: () => goToPly(i + 1) }, history[i] || ''),
+      h('div', { class: 'move', onclick: () => goToPly(i + 2) }, history[i + 1] || ''),
+    );
+    movesContainer.appendChild(pair);
+  }
+
+  // Initial position = full game
+  goToPly(history.length);
+
+  // Keyboard nav
+  const keyHandler = (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); goToPly(currentPly - 1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); goToPly(currentPly + 1); }
+    else if (e.key === 'Home') { e.preventDefault(); goToPly(0); }
+    else if (e.key === 'End') { e.preventDefault(); goToPly(history.length); }
+  };
+  document.addEventListener('keydown', keyHandler);
+  // Cleanup when view replaced
+  state.cleanups = state.cleanups || [];
+  state.cleanups.push(() => document.removeEventListener('keydown', keyHandler));
+
   return view;
 }
 
