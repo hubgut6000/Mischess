@@ -67,6 +67,21 @@ async function boot() {
   app.use(express.static(path.join(__dirname, '..', 'public'), {
     maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
     etag: true,
+    setHeaders(res, filePath) {
+      // Service worker must NEVER be cached - always check for updates
+      if (filePath.endsWith('sw.js')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+      // index.html should also not be cached so users get the latest shell
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+      // Manifest can be cached briefly
+      if (filePath.endsWith('manifest.webmanifest')) {
+        res.setHeader('Content-Type', 'application/manifest+json');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+      }
+    },
   }));
 
   app.get('*', (req, res) => {

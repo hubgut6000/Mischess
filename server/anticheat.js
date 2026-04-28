@@ -62,47 +62,88 @@ async function analyzeGame(game) {
   const whiteAccuracies = [];
   const blackAccuracies = [];
 
+  // Per-move data for analysis_moves table
+  const perMoveAnalysis = [];
+
+  // OPENING_PLY_SKIP: don't count first N plies for ACPL (book theory).
+  // Cheaters typically don't fire up the engine until they're out of book.
+  const OPENING_PLY_SKIP = 8;
+
+  // FORCED_THRESHOLD: if a move's eval delta is tiny (recapture, only-move),
+  // it doesn't tell us much about cheating. Weight it less.
+  const FORCED_DELTA_CP = 60;
+
   // Evaluate starting position
   let prevCp = await analyzer.evaluate(chess.fen(), ANALYSIS_DEPTH);
   if (prevCp === null) return null;
-  // prevCp is from side-to-move perspective (white at start)
-  let prevWinPctWhite = winPct(prevCp); // from white's perspective
+  let prevWinPctWhite = winPct(prevCp);
   const sideToMove = () => chess.turn() === 'w' ? 'white' : 'black';
+
+  // Get the best move from current position (for comparison + analysis_moves)
+  let bestMove = null;
+  try {
+    bestMove = await analyzer.getBestMove(chess.fen(), ANALYSIS_DEPTH);
+  } catch {}
 
   for (let i = 0; i < moves.length; i++) {
     const san = moves[i];
     const beforeSide = sideToMove();
+    const fenBefore = chess.fen();
+    const evalBefore = beforeSide === 'white' ? prevWinPctWhite : (100 - prevWinPctWhite);
+
     const move = chess.move(san);
     if (!move) break;
 
-    // Evaluate post-move position
     const cpAfterRaw = await analyzer.evaluate(chess.fen(), ANALYSIS_DEPTH);
     if (cpAfterRaw === null) continue;
 
-    // cpAfterRaw is from perspective of side to move AFTER the move (i.e. opponent)
-    // So cp from white's perspective: flip sign if it's black's turn to move now
     const cpAfterWhite = chess.turn() === 'w' ? cpAfterRaw : -cpAfterRaw;
     const winPctAfterWhite = winPct(cpAfterWhite);
 
-    // Loss from mover's perspective
     const moverWinPctBefore = beforeSide === 'white' ? prevWinPctWhite : (100 - prevWinPctWhite);
     const moverWinPctAfter = beforeSide === 'white' ? winPctAfterWhite : (100 - winPctAfterWhite);
     const moveAccuracy = accuracyFromLoss(moverWinPctBefore, moverWinPctAfter);
 
-    // Centipawn loss for this move (capped at 1000)
     const prevCpMover = beforeSide === 'white' ? cpFromWinPct(prevWinPctWhite) : -cpFromWinPct(prevWinPctWhite);
     const afterCpMover = beforeSide === 'white' ? cpAfterWhite : -cpAfterWhite;
     const cpLoss = Math.max(0, Math.min(1000, prevCpMover - afterCpMover));
 
-    if (beforeSide === 'white') {
-      whiteLosses.push(cpLoss);
-      whiteAccuracies.push(moveAccuracy);
-    } else {
-      blackLosses.push(cpLoss);
-      blackAccuracies.push(moveAccuracy);
+    // Classify the move
+    let classification = 'good';
+    if (cpLoss >= 300) classification = 'blunder';
+    else if (cpLoss >= 150) classification = 'mistake';
+    else if (cpLoss >= 50) classification = 'inaccuracy';
+
+    perMoveAnalysis.push({
+      ply: i + 1,
+      played_san: san,
+      best_move_san: (i === 0 && bestMove) ? bestMove : null,
+      eval_before: evalBefore,
+      eval_after: 100 - moverWinPctAfter,
+      classification,
+    });
+
+    // Weighted ACPL — skip opening book and weight near-forced moves less
+    const isInOpening = i < OPENING_PLY_SKIP;
+    if (!isInOpening) {
+      // Detect "forced" moves: positions where almost any move loses similar amount
+      // (heuristic: if cpLoss is small and starting eval is non-trivial)
+      const wasForcedRecapture = move.captured && Math.abs(prevCpMover) < 100 && cpLoss < FORCED_DELTA_CP;
+      const weight = wasForcedRecapture ? 0.3 : 1.0;
+
+      if (beforeSide === 'white') {
+        for (let w = 0; w < weight; w += 1) whiteLosses.push(cpLoss);
+        if (weight === 1.0) whiteLosses.push(cpLoss);
+        whiteAccuracies.push(moveAccuracy);
+      } else {
+        for (let w = 0; w < weight; w += 1) blackLosses.push(cpLoss);
+        if (weight === 1.0) blackLosses.push(cpLoss);
+        blackAccuracies.push(moveAccuracy);
+      }
     }
 
     prevWinPctWhite = winPctAfterWhite;
+    bestMove = null; // only first-move best is shown for now
   }
 
   const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
@@ -118,6 +159,7 @@ async function analyzeGame(game) {
       accuracy: +avg(blackAccuracies).toFixed(2),
       movesAnalyzed: blackLosses.length,
     },
+    perMove: perMoveAnalysis,
   };
 }
 
@@ -161,6 +203,25 @@ async function runAnalysisForGame(gameId) {
     `UPDATE games SET white_acpl = $1, white_accuracy = $2, black_acpl = $3, black_accuracy = $4, analyzed = true WHERE id = $5`,
     [result.white.acpl, result.white.accuracy, result.black.acpl, result.black.accuracy, gameId]
   );
+
+  // Persist per-move analysis for the analysis page
+  if (result.perMove && result.perMove.length > 0) {
+    try {
+      // Clear any existing partial analysis
+      await query('DELETE FROM analysis_moves WHERE game_id = $1', [gameId]);
+      // Bulk insert
+      for (const m of result.perMove) {
+        await query(
+          `INSERT INTO analysis_moves (game_id, ply, played_san, best_move_san, eval_before, eval_after, classification)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (game_id, ply) DO NOTHING`,
+          [gameId, m.ply, m.played_san, m.best_move_san, m.eval_before, m.eval_after, m.classification]
+        );
+      }
+    } catch (e) {
+      console.error('[analysis_moves persist]', e);
+    }
+  }
 
   // Update rolling window for each player
   if (game.white_id) {

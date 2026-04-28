@@ -110,11 +110,22 @@ class SoundManager {
     this._tone({ freq: 660, freqEnd: 990, duration: 0.12, type: 'triangle', gain: 0.22 });
   }
 
+  /** Trigger haptic feedback if available (mobile only) */
+  _haptic(pattern) {
+    try {
+      if (this.hapticDisabled) return;
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(pattern);
+      }
+    } catch {}
+  }
+
   /** Chess move — a wooden "clack". */
   move() {
     this._ensureCtx();
     this._tone({ freq: 180, freqEnd: 90, duration: 0.08, type: 'square', gain: 0.12 });
     this._noise({ duration: 0.03, gain: 0.08, highpass: 1500 });
+    this._haptic(8);
   }
 
   /** Capture — slightly sharper, includes noise burst. */
@@ -122,6 +133,7 @@ class SoundManager {
     this._ensureCtx();
     this._tone({ freq: 140, freqEnd: 70, duration: 0.1, type: 'square', gain: 0.15 });
     this._noise({ duration: 0.06, gain: 0.12, highpass: 800 });
+    this._haptic(15);
   }
 
   /** Check — alert ping. */
@@ -129,6 +141,7 @@ class SoundManager {
     this._ensureCtx();
     this._tone({ freq: 880, duration: 0.1, type: 'triangle', gain: 0.22 });
     this._tone({ freq: 1320, duration: 0.15, type: 'triangle', gain: 0.18, delay: 0.08 });
+    this._haptic([10, 30, 10]);
   }
 
   /** Game over — descending melody. */

@@ -5,6 +5,7 @@ const { GameCore } = require('./gameCore');
 const { query, one, tx } = require('./db/pool');
 const { eloUpdate } = require('./rating');
 const { enqueueAnalysis } = require('./anticheat');
+const { shareIp } = require('./ipTrack');
 
 // In-memory maps — ephemeral, OK if they reset on deploy because only live games rely on them.
 const games = new Map();     // gameId -> GameSession
@@ -357,7 +358,7 @@ class GameSession {
 /**
  * Matchmaking entry point. Shadow-pools flagged users.
  */
-function enqueue(ws, { userId, username, rating, flagged }, initialTime, increment, rated = true) {
+async function enqueue(ws, { userId, username, rating, flagged }, initialTime, increment, rated = true) {
   const key = queueKey(initialTime, increment, rated, flagged);
   if (!queues.has(key)) queues.set(key, []);
   const q = queues.get(key);
@@ -370,27 +371,52 @@ function enqueue(ws, { userId, username, rating, flagged }, initialTime, increme
 
   if (q.length > 0) {
     q.sort((a, b) => Math.abs(a.rating - rating) - Math.abs(b.rating - rating));
-    const opp = q.shift();
-    const whiteFirst = Math.random() < 0.5;
-    const white = whiteFirst ? { userId, username, rating, ws } : opp;
-    const black = whiteFirst ? opp : { userId, username, rating, ws };
 
-    const session = new GameSession({
-      id: gameId(),
-      whiteId: white.userId,
-      blackId: black.userId,
-      whiteName: white.username,
-      blackName: black.username,
-      whiteRating: white.rating,
-      blackRating: black.rating,
-      initialTime, increment,
-      category: categoryFor(initialTime, increment),
-      rated,
-    });
-    games.set(session.id, session);
-    userGame.set(white.userId, session.id);
-    userGame.set(black.userId, session.id);
-    return { matched: true, game: session, whiteWs: white.ws, blackWs: black.ws };
+    // For rated games, skip opponents who share an IP (anti-boost)
+    let opp = null;
+    if (rated) {
+      for (let i = 0; i < q.length; i++) {
+        const candidate = q[i];
+        try {
+          const shared = await shareIp(userId, candidate.userId);
+          if (!shared) {
+            opp = candidate;
+            q.splice(i, 1);
+            break;
+          }
+        } catch {
+          // If check fails, take this candidate (don't block legitimate matches due to DB issues)
+          opp = candidate;
+          q.splice(i, 1);
+          break;
+        }
+      }
+    } else {
+      opp = q.shift();
+    }
+
+    if (opp) {
+      const whiteFirst = Math.random() < 0.5;
+      const white = whiteFirst ? { userId, username, rating, ws } : opp;
+      const black = whiteFirst ? opp : { userId, username, rating, ws };
+
+      const session = new GameSession({
+        id: gameId(),
+        whiteId: white.userId,
+        blackId: black.userId,
+        whiteName: white.username,
+        blackName: black.username,
+        whiteRating: white.rating,
+        blackRating: black.rating,
+        initialTime, increment,
+        category: categoryFor(initialTime, increment),
+        rated,
+      });
+      games.set(session.id, session);
+      userGame.set(white.userId, session.id);
+      userGame.set(black.userId, session.id);
+      return { matched: true, game: session, whiteWs: white.ws, blackWs: black.ws };
+    }
   }
 
   q.push({ userId, username, rating, flagged, ws, joinedAt: Date.now() });

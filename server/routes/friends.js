@@ -4,6 +4,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { query, many, one } = require('../db/pool');
 const { authMiddleware } = require('../auth');
+const { shareIp } = require('../ipTrack');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -291,6 +292,22 @@ router.post('/challenges/:id/accept', async (req, res) => {
       return res.status(429).json({
         error: 'Too many rated games with this player recently. Try a casual game instead.',
       });
+    }
+  }
+
+  // IP-share check: rated games between users on same network/device are forbidden
+  if (ch.rated) {
+    try {
+      const sharedIp = await shareIp(ch.from_id, ch.to_id);
+      if (sharedIp) {
+        await query(`UPDATE challenges SET status = 'declined' WHERE id = $1`, [ch.id]);
+        return res.status(403).json({
+          error: 'Rated games are not allowed between accounts on the same network. Try a casual game.',
+        });
+      }
+    } catch (e) {
+      // If check fails, allow but log
+      console.warn('[shareIp check]', e.message);
     }
   }
 

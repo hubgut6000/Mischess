@@ -5,6 +5,7 @@ const url = require('url');
 const { verifyToken } = require('./auth');
 const { query, one } = require('./db/pool');
 const { games, enqueue, leaveQueue, getUserActiveGame, createDirectGame } = require('./gameManager');
+const { recordIp } = require('./ipTrack');
 
 const userSockets = new Map();
 const socketState = new WeakMap();
@@ -60,6 +61,10 @@ function initWebSocket(server) {
     socketState.set(ws, state);
     userToSocket.set(dbUser.id, ws);
     addSocket(dbUser.id, ws);
+
+    // Track IP for boost detection (X-Forwarded-For respected because trust proxy)
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+    if (ip) recordIp(dbUser.id, ip).catch(() => {});
 
     send(ws, { type: 'connected', username: dbUser.username, userId: dbUser.id });
 
@@ -143,7 +148,7 @@ async function handleMessage(ws, state, msg, dbUser) {
         : (it + 40 * inc < 1500) ? 'rating_rapid' : 'rating_classical';
       const rating = fresh[cat];
 
-      const result = enqueue(ws, {
+      const result = await enqueue(ws, {
         userId: state.userId, username: state.username, rating, flagged: state.flagged,
       }, it, inc, r);
       if (result.matched) {

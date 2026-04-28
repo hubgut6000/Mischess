@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { query, one } = require('../db/pool');
 const { hashPassword, verifyPassword, signToken, authMiddleware } = require('../auth');
 const { generateCsrfToken, setCsrfCookie } = require('../csrf');
+const { recordIp } = require('../ipTrack');
 
 const router = express.Router();
 
@@ -64,6 +65,7 @@ router.post('/register', authLimiter, async (req, res) => {
 
     const token = signToken({ id: row.id, username: row.username });
     setCookie(res, token);
+    recordIp(row.id, req.ip).catch(() => {});
     res.json({ ok: true, token, csrf, user: row });
   } catch (e) {
     console.error('[register]', e);
@@ -94,6 +96,7 @@ router.post('/login', authLimiter, async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'Invalid credentials', csrf });
 
     await query('UPDATE users SET last_seen = NOW() WHERE id = $1', [user.id]);
+    recordIp(user.id, req.ip).catch(() => {});
 
     const token = signToken({ id: user.id, username: user.username });
     setCookie(res, token);
