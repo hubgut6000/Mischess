@@ -81,6 +81,70 @@ function toast(msg, type = 'info') {
   setTimeout(() => t.remove(), 3900);
 }
 
+const STAGGER_SELECTOR = [
+  '.home-feature', '.tc-card', '.fairplay-card', '.quick-tc', '.recent-game-row',
+  '.live-stat', '.home-quick-play > *', '.play-quick-bar > *', '.analysis-stat',
+  '.leaderboard-table tr', '.friend-card', '.side-card', '.settings-section',
+].join(', ');
+
+function initButtonRipples() {
+  document.addEventListener('pointermove', (e) => {
+    const btn = e.target.closest('.btn');
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    btn.style.setProperty('--x', `${((e.clientX - r.left) / r.width) * 100}%`);
+    btn.style.setProperty('--y', `${((e.clientY - r.top) / r.height) * 100}%`);
+  }, { passive: true });
+}
+
+function observeReveal(root) {
+  const els = root.querySelectorAll('.anim-reveal');
+  if (!els.length) return;
+  if (!('IntersectionObserver' in window)) {
+    els.forEach(el => el.classList.add('is-visible'));
+    return;
+  }
+  const io = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('is-visible');
+        io.unobserve(entry.target);
+      }
+    }
+  }, { threshold: 0.08, rootMargin: '0px 0px -32px 0px' });
+  els.forEach(el => io.observe(el));
+}
+
+function staggerReveal(root) {
+  root.querySelectorAll(STAGGER_SELECTOR).forEach((el, i) => {
+    el.style.setProperty('--stagger', String(i));
+    el.classList.add('anim-stagger');
+  });
+  root.querySelectorAll(
+    '.home-manifesto, .home-board-preview, .form, .page-prose > h1, .play-layout > h1, .queue-status, .profile-hero'
+  ).forEach(el => el.classList.add('anim-reveal'));
+  observeReveal(root);
+}
+
+function wrapPage(content) {
+  const shell = h('div', { class: 'page-shell page-enter' });
+  if (content) {
+    if (!content.classList.contains('game-page')) content.classList.add('page-centered');
+    shell.appendChild(content);
+  }
+  return shell;
+}
+
+function activatePageMotion(shell) {
+  requestAnimationFrame(() => {
+    shell.classList.add('page-enter-active');
+    staggerReveal(shell);
+    shell.querySelectorAll('.home-board-preview').forEach(el => {
+      el.classList.add('anim-float', 'anim-glow-pulse');
+    });
+  });
+}
+
 function fmtTime(ms) {
   if (ms == null) return '--:--';
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -218,14 +282,28 @@ async function renderRoute() {
   $$('.main-nav a').forEach(a => a.classList.toggle('active',
     (location.hash || '#/').startsWith(a.getAttribute('href'))));
   const view = $('#view');
+  const outgoing = view.querySelector('.page-shell');
+  if (outgoing) {
+    outgoing.classList.add('page-exit');
+    await new Promise(r => setTimeout(r, 140));
+  }
   view.innerHTML = '';
-  if (!match) { view.appendChild(renderNotFound()); return; }
+  if (!match) {
+    const shell = wrapPage(renderNotFound());
+    view.appendChild(shell);
+    activatePageMotion(shell);
+    return;
+  }
   try {
     const content = await match.handler(match.params);
-    if (content) view.appendChild(content);
+    const shell = wrapPage(content);
+    view.appendChild(shell);
+    activatePageMotion(shell);
   } catch (e) {
     console.error(e);
-    view.appendChild(h('div', { class: 'loading' }, 'Error: ' + e.message));
+    const shell = wrapPage(h('div', { class: 'loading page-narrow text-center' }, 'Error: ' + e.message));
+    view.appendChild(shell);
+    activatePageMotion(shell);
   }
 }
 
@@ -386,7 +464,7 @@ route('/', async () => {
     ),
   );
 
-  const previewWrap = h('div', { class: 'home-board-preview', id: 'home-board-wrap' });
+  const previewWrap = h('div', { class: 'home-board-preview anim-reveal', id: 'home-board-wrap' });
   view.appendChild(h('div', { class: 'home-split' }, hero, previewWrap));
 
   // 3-up features
@@ -478,7 +556,7 @@ route('/', async () => {
 route('/login', async () => {
   if (state.user) { navigate('#/'); return null; }
   const view = h('div');
-  const form = h('form', { class: 'form', onsubmit: async (e) => {
+  const form = h('form', { class: 'form page-form anim-reveal', onsubmit: async (e) => {
     e.preventDefault();
     const username = $('input[name=username]', form).value;
     const password = $('input[name=password]', form).value;
@@ -517,7 +595,7 @@ route('/login', async () => {
 route('/register', async () => {
   if (state.user) { navigate('#/'); return null; }
   const view = h('div');
-  const form = h('form', { class: 'form', onsubmit: async (e) => {
+  const form = h('form', { class: 'form page-form anim-reveal', onsubmit: async (e) => {
     e.preventDefault();
     const username = $('input[name=username]', form).value;
     const email = $('input[name=email]', form).value;
@@ -568,7 +646,7 @@ route('/play', async () => {
 });
 
 function renderPlayPicker() {
-  const view = h('div', { class: 'play-layout' });
+  const view = h('div', { class: 'play-layout page-narrow' });
   view.appendChild(h('span', { class: 'kicker' }, 'Matchmaking'));
   view.appendChild(h('h1', {}, 'New game'));
   view.appendChild(h('p', { class: 'lead' }, 'Pick a time control. We\'ll find you a fair opponent.'));
@@ -1208,7 +1286,7 @@ route('/play/friend', async () => {
 
 // LEADERBOARD
 route('/leaderboard', async () => {
-  const view = h('div', { class: 'leaderboard' });
+  const view = h('div', { class: 'leaderboard page-narrow page-centered' });
   view.appendChild(h('h1', {}, 'Leaderboard'));
 
   const cats = ['bullet', 'blitz', 'rapid', 'classical'];
@@ -2206,7 +2284,12 @@ function onGameUpdate(game, lastMove) {
   state.game = game;
   if (state.board) {
     state.board.setPosition(game.fen);
-    if (lastMove) state.board.setLastMove(lastMove.from, lastMove.to);
+    if (lastMove) {
+      const lastSan = game.moves[game.moves.length - 1] || '';
+      state.board.setLastMove(lastMove.from, lastMove.to, {
+        captured: !!(lastMove.captured || lastSan.includes('x')),
+      });
+    }
   }
   const movesEl = $('.move-list');
   if (movesEl) renderMoveList(movesEl, game.fen, game.moves);
@@ -2504,7 +2587,7 @@ route('/about', async () => {
 
 // FAIRPLAY
 route('/fairplay', async () => {
-  const view = h('div', { class: 'page-prose' });
+  const view = h('div', { class: 'page-prose page-narrow' });
   view.appendChild(h('span', { class: 'kicker' }, 'Integrity'));
   view.appendChild(h('h1', {}, 'Fair Play'));
   view.appendChild(h('p', { class: 'lead' },
@@ -2547,6 +2630,7 @@ function renderNotFound() {
 // ---------- Boot ----------
 (async function boot() {
   await checkAuth();
+  initButtonRipples();
   installClickSounds(document);
   sound.setEnabled(state.settings.sound);
   if (!location.hash) location.hash = '#/';

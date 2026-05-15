@@ -265,12 +265,14 @@ p strong { color: var(--ink-1); font-weight: 600; }
 :root[data-theme="ocean"] .site-header { background: rgba(13, 24, 34, 0.75); }
 
 .header-inner {
-  max-width: 1180px;
+  max-width: var(--page-max, 1180px);
   margin: 0 auto;
   padding: 16px 24px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 32px;
+  width: 100%;
 }
 
 .brand {
@@ -292,6 +294,8 @@ p strong { color: var(--ink-1); font-weight: 600; }
   display: flex;
   gap: 2px;
   flex: 1;
+  justify-content: center;
+  align-items: center;
 }
 .main-nav a {
   padding: 8px 14px;
@@ -360,12 +364,9 @@ p strong { color: var(--ink-1); font-weight: 600; }
 /* -- Main content ------------------------------------------- */
 
 #view {
-  max-width: 1180px;
-  margin: 0 auto;
   padding: 56px 24px 80px;
   width: 100%;
   flex: 1;
-  animation: enter 0.5s var(--ease);
 }
 
 @keyframes enter {
@@ -2048,12 +2049,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
 }
 .cheat-warning svg { flex-shrink: 0; opacity: 0.9; }
 
-/* Board polish */
-.chess-board {
-  border-radius: var(--radius-m);
-  overflow: hidden;
-  box-shadow: var(--shadow-3), 0 0 0 1px var(--board-frame);
-}
+/* Board polish — see motion.css for glow/float */
 
 /* -- Update banner ----------------------------------------- */
 

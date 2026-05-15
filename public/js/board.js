@@ -87,9 +87,10 @@ export class Board {
     this.render();
   }
 
-  setLastMove(from, to) {
-    this.lastMove = from && to ? { from, to } : null;
+  setLastMove(from, to, opts = {}) {
+    this.lastMove = from && to ? { from, to, captured: !!opts.captured } : null;
     this._refreshHighlights();
+    this._animateLastMove();
   }
 
   getFen() { return this.chess.fen(); }
@@ -151,6 +152,23 @@ export class Board {
       }
     }
     this._refreshHighlights();
+    this._animateLastMove();
+  }
+
+  _animateLastMove() {
+    if (!this.lastMove?.to) return;
+    const sq = this.squareEls[this.lastMove.to];
+    if (!sq) return;
+    const piece = sq.querySelector('.piece');
+    if (!piece) return;
+    piece.classList.remove('piece-arrive');
+    void piece.offsetWidth;
+    piece.classList.add('piece-arrive');
+    piece.addEventListener('animationend', () => piece.classList.remove('piece-arrive'), { once: true });
+    if (this.lastMove.captured) {
+      const cap = this.squareEls[this.lastMove.from]?.querySelector('.piece-capture-ghost');
+      if (cap) cap.remove();
+    }
   }
 
   _bindEvents() {
