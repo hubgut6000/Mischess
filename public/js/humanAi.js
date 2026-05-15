@@ -68,46 +68,49 @@ export function generateHumanOpponent(targetElo) {
  * @param {import('chess.js').Chess} chess
  * @param {{ elo: number, ply: number, lastMove?: object }} ctx
  */
-/** Deliberately awful move picker for the 100-Elo "Dummy" bot. */
+/** Deliberately awful move picker for the 100-Elo "Dummy" bot. Returns { from, to, promotion? }. */
 export function pickDummyMove(chess) {
   const moves = chess.moves({ verbose: true });
   if (!moves.length) return null;
 
-  const toUci = (m) => m.from + m.to + (m.promotion || '');
+  const toMove = (m) => ({ from: m.from, to: m.to, promotion: m.promotion });
 
-  const givesMate = (m) => {
-    const c = new window.Chess(chess.fen());
-    c.move(m);
-    return c.isCheckmate();
+  const tryMove = (fen, m) => {
+    const c = new window.Chess(fen);
+    const res = c.move(toMove(m));
+    return res ? c : null;
   };
 
-  const mates = moves.filter(givesMate);
+  const mates = moves.filter(m => {
+    const c = tryMove(chess.fen(), m);
+    return c && c.isCheckmate();
+  });
+
   let pool = moves;
-  // Often refuses the obvious mate
   if (mates.length && Math.random() < 0.5) {
-    pool = moves.filter(m => !mates.includes(m));
-    if (!pool.length) pool = moves;
+    const nonMates = moves.filter(m => !mates.some(mt => mt.from === m.from && mt.to === m.to));
+    if (nonMates.length) pool = nonMates;
   }
 
   if (Math.random() < 0.55) {
-    return toUci(pool[Math.floor(Math.random() * pool.length)]);
+    return toMove(pool[Math.floor(Math.random() * pool.length)]);
   }
 
   const color = chess.turn();
   const scored = pool.map(m => {
-    const c = new window.Chess(chess.fen());
-    c.move(m);
+    const c = tryMove(chess.fen(), m);
+    if (!c) return { m, s: Infinity };
     let s = _materialFor(c, color);
     s += (Math.random() - 0.25) * 700;
-    if (m.san.includes('+')) s += 150;
-    if (m.san.includes('#')) s += 500;
+    if (c.isCheckmate()) s += 500;
+    else if (c.isCheck()) s += 150;
     if (m.captured) s -= Math.random() * 120;
     return { m, s };
   });
 
   scored.sort((a, b) => a.s - b.s);
   const worst = scored.slice(0, Math.max(1, Math.ceil(scored.length * 0.4)));
-  return toUci(worst[Math.floor(Math.random() * worst.length)].m);
+  return toMove(worst[Math.floor(Math.random() * worst.length)].m);
 }
 
 function _materialFor(chess, color) {
@@ -120,7 +123,7 @@ function _materialFor(chess, color) {
       score += p.color === color ? v : -v;
     }
   }
-  if (chess.inCheck() && chess.turn() === color) score -= 3;
+  if (chess.isCheck() && chess.turn() === color) score -= 3;
   return score;
 }
 

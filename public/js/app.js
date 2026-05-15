@@ -1073,7 +1073,7 @@ function renderAiGameView(aiGame) {
       if (state.settings.moveSound) {
         if (res.captured) sound.capture();
         else sound.move();
-        if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
+        if (aiGame.chess.isCheck()) setTimeout(() => sound.check(), 120);
       }
       board.setLastMove(res.from, res.to, { captured: !!res.captured });
       board.setPosition(aiGame.chess.fen());
@@ -1116,44 +1116,55 @@ async function requestAiMove(aiGame, board, moveList) {
       lastMove: aiGame.lastMove,
     });
 
-    let moveUci;
-    if (aiGame.preset.dummy) {
+    let moveObj;
+    if (aiGame.preset?.dummy) {
       await sleep(thinkMs);
-      moveUci = pickDummyMove(aiGame.chess);
+      moveObj = pickDummyMove(aiGame.chess);
     } else {
       const movetime = engineMoveTime(elo, ply);
       const engine = state.stockfish;
-      [moveUci] = await Promise.all([
+      const [moveUci] = await Promise.all([
         engine.getBestMove(aiGame.chess.fen(), {
           depth: aiGame.preset.depth,
           movetime,
         }),
         sleep(thinkMs),
       ]);
+      if (moveUci) {
+        moveObj = {
+          from: moveUci.slice(0, 2),
+          to: moveUci.slice(2, 4),
+          promotion: moveUci.length >= 5 ? moveUci[4] : undefined,
+        };
+      }
     }
 
-    if (!moveUci) return;
+    if (!moveObj) return;
 
-    const from = moveUci.slice(0, 2);
-    const to = moveUci.slice(2, 4);
-    const promotion = moveUci.length >= 5 ? moveUci[4] : undefined;
-    const res = aiGame.chess.move({ from, to, promotion });
-    if (!res) return;
+    let res = aiGame.chess.move(moveObj);
+    if (!res) {
+      const fallback = aiGame.chess.moves({ verbose: true })[0];
+      if (!fallback) return;
+      res = aiGame.chess.move({ from: fallback.from, to: fallback.to, promotion: fallback.promotion });
+      if (!res) return;
+    }
 
     aiGame.lastMove = res;
     aiGame.history.push(res.san);
     if (state.settings.moveSound) {
       if (res.captured) sound.capture();
       else sound.move();
-      if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
+      if (aiGame.chess.isCheck()) setTimeout(() => sound.check(), 120);
     }
     board.setLastMove(res.from, res.to, { captured: !!res.captured });
     board.setPosition(aiGame.chess.fen());
     renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     checkAiGameEnd(aiGame);
   } catch (e) {
-    console.error(e);
-    if (!aiGame.isGhost) toast('Engine error', 'error');
+    console.error('AI move failed:', e);
+    if (!aiGame.isGhost) {
+      toast(aiGame.preset?.dummy ? 'Dummy tripped over itself' : 'Engine error', 'error');
+    }
   } finally {
     aiGame.thinking = false;
     if (ind) {

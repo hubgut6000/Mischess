@@ -225,7 +225,7 @@ export class Board {
       if (this.squareEls[this.lastMove.from]) this.squareEls[this.lastMove.from].classList.add('move-from');
       if (this.squareEls[this.lastMove.to]) this.squareEls[this.lastMove.to].classList.add('move-to');
     }
-    if (this.chess.inCheck()) {
+    if (this.chess.isCheck()) {
       const turn = this.chess.turn();
       const board = this.chess.board();
       for (let r = 0; r < 8; r++) {
