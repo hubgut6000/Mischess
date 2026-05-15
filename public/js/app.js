@@ -1022,7 +1022,7 @@ async function requestAiMove(aiGame, board, moveList) {
   aiGame.thinking = true;
   const ind = $('#ai-thinking');
   const oppStrip = $('#ai-opp-strip');
-  const ply = aiGame.chess.history().length;
+  const ply = aiGame.history.length;
   const elo = aiGame.opponent?.elo ?? aiGame.preset.elo;
 
   if (ind) {
