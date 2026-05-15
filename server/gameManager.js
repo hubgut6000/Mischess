@@ -442,10 +442,15 @@ function getUserActiveGame(userId) {
 }
 
 function createDirectGame(opts) {
+  const id = opts.id || gameId();
+  const category = opts.category || categoryFor(opts.initialTime, opts.increment);
   const game = new GameSession({
+    id,
     whiteId: opts.whiteId, whiteName: opts.whiteName, whiteRating: opts.whiteRating,
     blackId: opts.blackId, blackName: opts.blackName, blackRating: opts.blackRating,
-    initialTime: opts.initialTime, increment: opts.increment, rated: opts.rated,
+    initialTime: opts.initialTime, increment: opts.increment,
+    category,
+    rated: opts.rated,
   });
   games.set(game.id, game);
   if (opts.whiteId) userGame.set(opts.whiteId, game.id);

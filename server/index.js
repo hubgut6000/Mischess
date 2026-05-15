@@ -59,6 +59,15 @@ async function boot() {
   // CSRF protection for state-changing API routes
   app.use('/api/', csrfMiddleware);
 
+  app.get('/api/health', async (req, res) => {
+    try {
+      await getPool().query('SELECT 1');
+      res.json({ ok: true, db: true, ts: Date.now() });
+    } catch (e) {
+      res.status(503).json({ ok: false, db: false, error: 'database unavailable' });
+    }
+  });
+
   app.use('/api/auth', authRoutes);
   app.use('/api/users', userRoutes);
   app.use('/api/games', gameRoutes);

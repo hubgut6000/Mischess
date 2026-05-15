@@ -16,3 +16,23 @@ export const PIECES = {
   bN: `data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 45 45'><g fill='%231d1a15' stroke='%231d1a15' stroke-width='1.5' stroke-linejoin='round'><path d='M22 10c10.5 1 16.5 8 16 29H15c0-9 10-6.5 8-21' fill='%231d1a15'/><path d='M24 18c.38 2.91-5.55 7.37-8 9-3 2-2.82 4.34-5 4-1.042-.94 1.41-3.04 0-3-1 0 .19 1.23-1 2-1 0-4.003 1-4-4 0-2 6-12 6-12s1.89-1.9 2-3.5c-.73-.994-.5-2-.5-3 1-1 3 2.5 3 2.5h2s.78-1.992 2.5-3c1 0 1 3 1 3' fill='%231d1a15'/><path d='M9.5 25.5a.5.5 0 1 1-1 0 .5.5 0 1 1 1 0z' fill='%23fffbef' stroke='%23fffbef'/><path d='M15 15.5a.5 1.5 0 1 1-1 0 .5 1.5 0 1 1 1 0z' fill='%23fffbef' stroke='%23fffbef' transform='rotate(30 14.5 15.5)'/><path d='M24.55 10.4l-.45 1.45.5.15c3.15 1 5.65 2.49 7.9 6.75S35.75 29.06 35.25 39l-.05.5h2.25l.05-.5c.5-10.06-.88-16.85-3.25-21.34-2.37-4.49-5.79-6.64-9.19-7.16l-.51-.1z' fill='%23fffbef' stroke='none'/></g></svg>`,
   bP: `data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 45 45'><path d='M22.5 9c-2.21 0-4 1.79-4 4 0 .89.29 1.71.78 2.38-1.95 1.12-3.28 3.21-3.28 5.62 0 2.03.94 3.84 2.41 5.03-3 1.06-7.41 5.55-7.41 13.47h23c0-7.92-4.41-12.41-7.41-13.47 1.47-1.19 2.41-3 2.41-5.03 0-2.41-1.33-4.5-3.28-5.62.49-.67.78-1.49.78-2.38 0-2.21-1.79-4-4-4z' fill='%231d1a15' stroke='%231d1a15' stroke-width='1.5' stroke-linecap='round'/></svg>`,
 };
+
+function tintSet(source, white, black, stroke) {
+  const out = {};
+  for (const [key, uri] of Object.entries(source)) {
+    let s = uri.replaceAll('%23fffbef', white).replaceAll('%231d1a15', black);
+    if (stroke) s = s.replaceAll('%23333', stroke);
+    out[key] = s;
+  }
+  return out;
+}
+
+export const PIECE_SETS = {
+  classic: PIECES,
+  neo: tintSet(PIECES, '%23e3f0ff', '%23152232', '%231e3a5f'),
+  wood: tintSet(PIECES, '%23f3e6c8', '%235a3b28', '%234a3520'),
+};
+
+export function getPieceSet(name = 'classic') {
+  return PIECE_SETS[name] || PIECE_SETS.classic;
+}

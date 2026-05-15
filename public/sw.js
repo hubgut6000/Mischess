@@ -9,7 +9,7 @@
  * Bump VERSION on each deploy so old caches are purged.
  */
 
-const VERSION = 'v9';
+const VERSION = 'v10';
 const STATIC_CACHE = `mischess-static-${VERSION}`;
 const HTML_CACHE = `mischess-html-${VERSION}`;
 

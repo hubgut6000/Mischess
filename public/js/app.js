@@ -27,7 +27,31 @@ const state = {
   queueSeek: null,       // active matchmaking + ghost fallback timer
   settings: loadSettings(),
   lastFen: null,       // to detect move type (capture/check) for sound
+  lastEndedGame: null,
+  pendingSwUpdate: false,
+  cleanups: [],
 };
+
+function getActivePieceSet() {
+  return state.user?.piece_set || state.settings.boardTheme || 'classic';
+}
+
+function persistActiveGame(id) {
+  try {
+    if (id) localStorage.setItem('mischess:activeGame', id);
+    else localStorage.removeItem('mischess:activeGame');
+  } catch {}
+}
+
+function loadActiveGameId() {
+  try { return localStorage.getItem('mischess:activeGame'); } catch { return null; }
+}
+
+function isInLiveGame() {
+  return !!(state.game && !state.game.ended && state.playerColor);
+}
+
+window.__mischessInGame = isInLiveGame;
 
 function loadSettings() {
   try {
@@ -218,6 +242,10 @@ async function checkAuth() {
         saveToken(data.token);
       }
       if (data.user.theme) applyTheme(data.user.theme);
+      if (data.user.piece_set) {
+        state.settings.boardTheme = data.user.piece_set;
+        saveSettings();
+      }
     } else {
       state.user = null;
       if (state.token) {
@@ -417,11 +445,22 @@ function onWsMessage(ev) {
     }
     case 'challengeReceived':
       sound.matchFound();
-      toast(`${msg.from} challenged you to a game! Check your challenges page.`, 'info');
+      toast(`${msg.from} challenged you!`, 'info');
+      navigate('#/friends');
+      setTimeout(() => renderRoute(), 80);
       break;
     case 'challengeAccepted':
-      // Server will follow up with gameStart
       toast(`${msg.username} accepted your challenge`, 'success');
+      break;
+    case 'rematchOffer':
+      sound.matchFound();
+      toast(`${msg.from} wants a rematch (${msg.timeControl})`, 'info');
+      if (confirm(`Rematch ${msg.from}? (${msg.timeControl}${msg.rated ? ', rated' : ', casual'})`)) {
+        sendWs({ type: 'rematch', gameId: msg.gameId });
+      }
+      break;
+    case 'rematchPending':
+      toast('Rematch sent — waiting for opponent', 'info');
       break;
     case 'newMessage':
       // From DM partner
@@ -837,7 +876,8 @@ async function startGhostMatch() {
   await startAiGame(preset, playerColor, {
     opponent,
     isGhost: true,
-    ghostNote: 'casual',
+    initialTime: q.initialTime,
+    increment: q.increment,
   });
 }
 
@@ -939,6 +979,11 @@ async function startAiGame(preset, playerColor, opts = {}) {
     history: [],
     thinking: false,
     lastMove: null,
+    initialTime: opts.initialTime || null,
+    increment: opts.increment || 0,
+    whiteTime: opts.initialTime ? opts.initialTime * 1000 : null,
+    blackTime: opts.initialTime ? opts.initialTime * 1000 : null,
+    clockTurnStarted: Date.now(),
   };
   renderAiGameView(aiGame);
 }
@@ -957,14 +1002,14 @@ function renderAiGameView(aiGame) {
         h('div', { class: 'rating' }, String(aiGame.opponent?.rating ?? aiGame.preset.elo)),
       ),
     ),
-    h('div', { class: 'clock', id: 'ai-thinking' }, aiGame.isGhost ? 'online' : 'ready'),
+    h('div', { class: 'clock', id: 'ai-opp-clock' }, aiGame.whiteTime != null ? fmtTime(aiGame.playerColor === 'white' ? aiGame.blackTime : aiGame.whiteTime) : (aiGame.isGhost ? 'online' : 'ready')),
   );
   const meStrip = h('div', { class: 'player-strip' },
     h('div', { class: 'player-info' },
       h('span', { class: 'name' }, state.user ? state.user.username : 'You'),
       state.user ? h('span', { class: 'rating' }, `${state.user.rating_blitz}`) : null,
     ),
-    h('div', { class: 'clock' }, '--'),
+    h('div', { class: 'clock', id: 'ai-player-clock' }, aiGame.whiteTime != null ? fmtTime(aiGame.playerColor === 'white' ? aiGame.whiteTime : aiGame.blackTime) : '--'),
   );
   boardCol.appendChild(oppStrip);
   const boardEl = h('div');
@@ -999,6 +1044,7 @@ function renderAiGameView(aiGame) {
 
   const board = new Board(boardEl, {
     orientation: aiGame.playerColor,
+    pieceSet: getActivePieceSet(),
     onMove: (move) => {
       if (aiGame.thinking) return false;
       const res = aiGame.chess.move(move);
@@ -1035,7 +1081,7 @@ function renderAiGameView(aiGame) {
 async function requestAiMove(aiGame, board, moveList) {
   if (aiGame.chess.isGameOver()) return;
   aiGame.thinking = true;
-  const ind = $('#ai-thinking');
+  const ind = $('#ai-opp-clock');
   const oppStrip = $('#ai-opp-strip');
   const ply = aiGame.history.length;
   const elo = aiGame.opponent?.elo ?? aiGame.preset.elo;
@@ -1088,7 +1134,12 @@ async function requestAiMove(aiGame, board, moveList) {
   } finally {
     aiGame.thinking = false;
     if (ind) {
-      ind.textContent = aiGame.isGhost ? 'online' : 'ready';
+      if (aiGame.whiteTime != null) {
+        const oppT = aiGame.playerColor === 'white' ? aiGame.blackTime : aiGame.whiteTime;
+        ind.textContent = fmtTime(oppT);
+      } else {
+        ind.textContent = aiGame.isGhost ? 'online' : 'ready';
+      }
       ind.classList.remove('active');
     }
     if (oppStrip) oppStrip.classList.remove('active-turn');
@@ -1348,46 +1399,32 @@ route('/play/friend', async () => {
   if (!state.user) { navigate('#/login'); return null; }
   const view = h('div', { class: 'play-layout' });
   view.appendChild(h('h1', {}, 'Challenge a friend'));
-  view.appendChild(h('p', {}, 'Share a direct invite link. When your friend opens it, both of you join the same game.'));
+  view.appendChild(h('p', {}, 'Pick a friend and time control. They accept under Friends → Challenges, then you both join automatically.'));
 
-  let selected = { initial: 300, inc: 3, label: '5+3' };
-  const TC = [
-    { initial: 60, inc: 0, label: '1+0' },
-    { initial: 180, inc: 2, label: '3+2' },
-    { initial: 300, inc: 3, label: '5+3' },
-    { initial: 600, inc: 0, label: '10+0' },
-    { initial: 1800, inc: 20, label: '30+20' },
-  ];
-  const grid = h('div', { class: 'tc-grid' });
-  TC.forEach(tc => {
-    const c = h('div', { class: 'tc-card' + (tc === selected ? ' selected' : ''), onclick: () => {
-      selected = tc;
-      $$('.tc-card', grid).forEach(x => x.classList.remove('selected'));
-      c.classList.add('selected');
-    }}, h('div', { class: 'tc-time' }, tc.label));
-    grid.appendChild(c);
-  });
-  view.appendChild(grid);
+  const listEl = h('div', { class: 'friend-list', style: 'margin-top:20px' });
+  view.appendChild(listEl);
 
-  const linkBox = h('div', { class: 'queue-status', style: 'margin-top:24px' },
-    h('p', {}, 'Your invite link will appear here. Keep this page open while you wait.'));
-  view.appendChild(linkBox);
+  try {
+    const { friends } = await api('/api/friends');
+    if (!friends.length) {
+      listEl.appendChild(h('p', { class: 'text-dim' }, 'Add friends first from their profile or the Friends page.'));
+      listEl.appendChild(h('a', { href: '#/friends', 'data-link': '', class: 'btn btn-outline', style: 'margin-top:12px' }, 'Go to Friends'));
+    } else {
+      for (const f of friends) {
+        listEl.appendChild(h('div', { class: 'friend-item' },
+          h('div', { class: 'player-info' },
+            h('div', { class: 'avatar' }, f.username[0].toUpperCase()),
+            h('div', { class: 'name' }, f.username),
+          ),
+          h('button', { class: 'btn btn-primary btn-sm', onclick: () => challengeFriend(f.username) }, 'Challenge'),
+        ));
+      }
+    }
+  } catch (e) {
+    listEl.appendChild(h('p', { class: 'toast error' }, e.message));
+  }
 
-  view.appendChild(h('div', { class: 'play-options-row' },
-    h('button', { class: 'btn btn-primary', onclick: async () => {
-      // Use WebSocket seek with a private key (simulate via unusual time control combo)
-      // Simpler: use seek with a custom flag
-      await ensureWs();
-      // Reuse regular queue but restrict to friend via a token in URL
-      // For simplicity, encode: use normal matchmaking with casual flag
-      toast('Friend challenges coming soon — using standard matchmaking for this build');
-      sendWs({ type: 'seekGame', initialTime: selected.initial, increment: selected.inc, rated: false });
-      linkBox.innerHTML = '';
-      linkBox.appendChild(h('div', {},
-        h('span', { class: 'pulse' }),
-        h('span', {}, 'Waiting for any opponent at ' + selected.label + ' (casual)...')));
-    }}, 'Create game'),
-  ));
+  view.appendChild(h('a', { href: '#/friends', 'data-link': '', class: 'btn btn-ghost', style: 'margin-top:20px' }, 'View pending challenges'));
   return view;
 });
 
@@ -2038,9 +2075,13 @@ route('/game/:id', async (params) => {
   try {
     const data = await api('/api/games/' + params.id);
     if (data.live) {
-      // Join as spectator
-      sendWs({ type: 'spectate', gameId: params.id });
       state.game = data.game;
+      if (data.yourColor) {
+        state.playerColor = data.yourColor;
+        persistActiveGame(data.game.id);
+        return renderGamePage(data.game);
+      }
+      sendWs({ type: 'spectate', gameId: params.id });
       state.playerColor = null;
       return renderGamePage(data.game);
     } else {
@@ -2313,6 +2354,7 @@ function renderGamePage(game) {
   // Build board
   const board = new Board(boardEl, {
     orientation,
+    pieceSet: getActivePieceSet(),
     interactive: isPlayer,
     onMove: (move) => {
       if (!isPlayer) return false;
@@ -2371,6 +2413,8 @@ function onGameStart(game, yourColor) {
   state.game = game;
   state.playerColor = yourColor;
   state.lastFen = game.fen;
+  if (yourColor) persistActiveGame(game.id);
+  dismissResumeBanner();
   // Activate anti-cheat telemetry for this game
   if (yourColor && !state.telemetry) {
     state.telemetry = new AntiCheatTelemetry((msg) => {
@@ -2483,7 +2527,12 @@ function onGameEnd(game) {
       renderAuthArea();
     }
   }
-  showGameEndModal(msg, () => navigate('#/play'));
+  state.lastEndedGame = { id: game.id, rated: game.rated, timeControl: game.timeControl };
+  persistActiveGame(null);
+  showGameEndModal(msg, game);
+  if (window.__mischessUpdatePending) {
+    setTimeout(() => window.location.reload(), 400);
+  }
 }
 
 function onChatMessage(msg) {
@@ -2498,22 +2547,63 @@ function onChatMessage(msg) {
   if (state.user && msg.username !== state.user.username) sound.notify();
 }
 
-function showGameEndModal(message, onClose) {
+function showGameEndModal(message, gameOrClose) {
+  const game = gameOrClose && typeof gameOrClose === 'object' && gameOrClose.id ? gameOrClose : null;
+  const onClose = typeof gameOrClose === 'function' ? gameOrClose : null;
   const existing = $('.modal-backdrop');
   if (existing) existing.remove();
   const backdrop = h('div', { class: 'modal-backdrop' });
   const modal = h('div', { class: 'modal' },
     h('h3', {}, 'Game over'),
     h('p', {}, message),
-    h('div', { class: 'modal-actions' },
-      h('button', { class: 'btn btn-primary', onclick: () => { backdrop.remove(); if (onClose) onClose(); }}, 'Continue'),
-    ),
   );
+  const actions = h('div', { class: 'modal-actions' });
+  if (game?.id && state.playerColor) {
+    actions.appendChild(h('button', { class: 'btn btn-primary', onclick: () => {
+      backdrop.remove();
+      sendWs({ type: 'rematch', gameId: game.id });
+    }}, 'Rematch'));
+  }
+  if (game?.id) {
+    actions.appendChild(h('button', { class: 'btn btn-outline', onclick: () => {
+      backdrop.remove();
+      navigate('#/analysis/' + game.id);
+      renderRoute();
+    }}, 'Review game'));
+  }
+  actions.appendChild(h('button', { class: 'btn btn-ghost', onclick: () => {
+    backdrop.remove();
+    if (onClose) onClose();
+    else { navigate('#/play'); renderRoute(); }
+  }}, onClose ? 'Continue' : 'Back to play'));
+  modal.appendChild(actions);
   backdrop.appendChild(modal);
   document.body.appendChild(backdrop);
 }
 
+function dismissResumeBanner() {
+  const mount = $('#resume-banner-mount');
+  if (mount) mount.innerHTML = '';
+}
+
+function maybeShowResumeBanner() {
+  const id = loadActiveGameId();
+  if (!id || !state.user) return;
+  if (state.game?.id === id && state.playerColor) return;
+  const mount = $('#resume-banner-mount');
+  if (!mount) return;
+  mount.innerHTML = '';
+  mount.appendChild(h('div', { class: 'resume-banner' },
+    h('span', {}, 'You have a game in progress.'),
+    h('button', { class: 'btn btn-primary btn-sm', onclick: () => navigate('#/game/' + id) }, 'Return to game'),
+    h('button', { class: 'btn btn-ghost btn-sm', onclick: () => { persistActiveGame(null); dismissResumeBanner(); } }, 'Dismiss'),
+  ));
+}
+
 function cleanupGame() {
+  if (state.game?.id && state.playerColor && !state.game.ended) {
+    persistActiveGame(state.game.id);
+  }
   state.game = null;
   state.playerColor = null;
   if (state.focusBlurListener) {
@@ -2567,6 +2657,36 @@ route('/settings', async () => {
   });
   themeSection.appendChild(themeGrid);
   view.appendChild(themeSection);
+
+  const pieceSection = h('div', { class: 'settings-section' });
+  pieceSection.appendChild(h('h3', {}, 'Pieces'));
+  pieceSection.appendChild(h('p', { class: 'section-desc' }, 'Board piece style.'));
+  const pieceGrid = h('div', { class: 'theme-grid' });
+  const PIECES_OPTS = [
+    { id: 'classic', name: 'Classic' },
+    { id: 'neo', name: 'Neo' },
+    { id: 'wood', name: 'Wood' },
+  ];
+  const curPiece = getActivePieceSet();
+  PIECES_OPTS.forEach(p => {
+    const opt = h('div', {
+      class: 'theme-option' + (p.id === curPiece ? ' active' : ''),
+      onclick: async () => {
+        state.settings.boardTheme = p.id;
+        saveSettings();
+        if (state.board) state.board.setPieceSet(p.id);
+        $('.theme-option', pieceGrid).forEach(x => x.classList.remove('active'));
+        opt.classList.add('active');
+        sound.click();
+        if (state.user) {
+          try { await api('/api/users/me', { method: 'PUT', body: { piece_set: p.id } }); state.user.piece_set = p.id; } catch {}
+        }
+      },
+    }, h('div', { class: 'theme-swatch' }), h('div', { class: 'theme-name' }, p.name));
+    pieceGrid.appendChild(opt);
+  });
+  pieceSection.appendChild(pieceGrid);
+  view.appendChild(pieceSection);
 
   // ===== Audio =====
   const audioSection = h('div', { class: "settings-section" });
@@ -2743,5 +2863,6 @@ function renderNotFound() {
   sound.setEnabled(state.settings.sound);
   if (!location.hash) location.hash = '#/';
   if (state.user) ensureWs().catch(() => {});
+  maybeShowResumeBanner();
   renderRoute();
 })();

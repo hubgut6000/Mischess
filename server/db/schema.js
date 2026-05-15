@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS challenges (
 
 CREATE INDEX IF NOT EXISTS idx_challenges_to ON challenges(to_id, status);
 
+ALTER TABLE challenges ADD COLUMN IF NOT EXISTS responded_at TIMESTAMPTZ;
+
 -- Behavioral restrictions (resignation farming, account boosting, harassment)
 CREATE TABLE IF NOT EXISTS restrictions (
   id SERIAL PRIMARY KEY,

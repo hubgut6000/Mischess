@@ -13,7 +13,7 @@ services:
       apt-get update && apt-get install -y stockfish || true
       npm install
     startCommand: node server/index.js
-    healthCheckPath: /
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
         value: 20.18.1

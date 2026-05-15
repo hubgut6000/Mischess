@@ -41,6 +41,9 @@ A high-performance online chess platform. Real-time multiplayer, AI opponents, A
 
 ## Deploy to Render
 
+**Before each release:** bump `VERSION` in `public/sw.js` (e.g. `v10` → `v11`) so clients auto-update.
+
+
 1. Push this repo to GitHub.
 2. On [render.com](https://render.com): **New → Blueprint** → connect your repo.
 3. Render reads `render.yaml`, provisions a Postgres database, installs Stockfish via apt during the build, generates `JWT_SECRET`, runs migrations on first boot, and deploys.

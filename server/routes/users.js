@@ -7,7 +7,7 @@ const { authMiddleware } = require('../auth');
 const router = express.Router();
 
 const ALLOWED_THEMES = ['cozy', 'dark', 'forest', 'rose', 'ocean'];
-const ALLOWED_PIECES = ['classic'];
+const ALLOWED_PIECES = ['classic', 'neo', 'wood'];
 
 router.get('/leaderboard', async (req, res) => {
   const category = req.query.category || 'blitz';

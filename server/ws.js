@@ -10,6 +10,7 @@ const { recordIp } = require('./ipTrack');
 const userSockets = new Map();
 const socketState = new WeakMap();
 const userToSocket = new Map(); // userId -> ws (for finding online users)
+const rematchOffers = new Map(); // userId -> { fromId, fromName, gameId, ... }
 
 function addSocket(userId, ws) {
   if (!userSockets.has(userId)) userSockets.set(userId, new Set());
@@ -25,6 +26,18 @@ function removeSocket(userId, ws) {
 
 function send(ws, msg) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function attachPlayersToGame(game, whiteWs, blackWs) {
+  game.sockets.add(whiteWs);
+  game.sockets.add(blackWs);
+  const ws1 = socketState.get(whiteWs);
+  const ws2 = socketState.get(blackWs);
+  if (ws1) ws1.watchingGameId = game.id;
+  if (ws2) ws2.watchingGameId = game.id;
+  const snap = game.snapshot();
+  send(whiteWs, { type: 'gameStart', game: snap, yourColor: 'white' });
+  send(blackWs, { type: 'gameStart', game: snap, yourColor: 'black' });
 }
 
 function broadcastToGame(game, msg) {
@@ -220,20 +233,68 @@ async function handleMessage(ws, state, msg, dbUser) {
         whiteId, whiteName, whiteRating,
         blackId, blackName, blackRating,
         initialTime: ch.initial_time, increment: ch.increment, rated: ch.rated,
+        category: cat,
       });
-      game.sockets.add(whiteWs);
-      game.sockets.add(blackWs);
-      const ws1 = socketState.get(whiteWs);
-      const ws2 = socketState.get(blackWs);
-      if (ws1) ws1.watchingGameId = game.id;
-      if (ws2) ws2.watchingGameId = game.id;
 
       await query(`UPDATE challenges SET game_id = $1, status = 'completed' WHERE id = $2`,
         [game.id, ch.id]);
 
-      send(whiteWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'white' });
-      send(blackWs, { type: 'gameStart', game: game.snapshot(), yourColor: 'black' });
+      attachPlayersToGame(game, whiteWs, blackWs);
       return;
+    }
+
+    case 'rematch': {
+      const prev = games.get(msg.gameId);
+      if (!prev || !prev.ended) return send(ws, { type: 'error', error: 'Cannot rematch this game' });
+      const myColor = prev.playerColor(state.userId);
+      if (!myColor) return send(ws, { type: 'error', error: 'You were not in this game' });
+      const oppId = myColor === 'white' ? prev.blackId : prev.whiteId;
+      if (!oppId) return send(ws, { type: 'error', error: 'No opponent to rematch' });
+
+      const incoming = rematchOffers.get(state.userId);
+      if (incoming && incoming.fromId === oppId && incoming.gameId === prev.id) {
+        rematchOffers.delete(state.userId);
+        rematchOffers.delete(oppId);
+        const oppWs = userToSocket.get(oppId);
+        if (!oppWs || oppWs.readyState !== 1) {
+          return send(ws, { type: 'error', error: 'Opponent went offline' });
+        }
+        const cat = prev.category;
+        const col = `rating_${cat}`;
+        const [whiteUser, blackUser] = await Promise.all([
+          one(`SELECT ${col} AS rating FROM users WHERE id = $1`, [prev.whiteId]),
+          one(`SELECT ${col} AS rating FROM users WHERE id = $1`, [prev.blackId]),
+        ]);
+        const whiteWs = myColor === 'white' ? ws : oppWs;
+        const blackWs = myColor === 'white' ? oppWs : ws;
+        const game = createDirectGame({
+          whiteId: prev.whiteId, whiteName: prev.whiteName, whiteRating: whiteUser.rating,
+          blackId: prev.blackId, blackName: prev.blackName, blackRating: blackUser.rating,
+          initialTime: prev.initialTime, increment: prev.increment, rated: prev.rated,
+          category: prev.category,
+        });
+        attachPlayersToGame(game, whiteWs, blackWs);
+        return;
+      }
+
+      rematchOffers.set(oppId, {
+        fromId: state.userId,
+        fromName: state.username,
+        gameId: prev.id,
+        timeControl: prev.timeControl,
+        rated: prev.rated,
+      });
+      const oppWs = userToSocket.get(oppId);
+      if (oppWs) {
+        send(oppWs, {
+          type: 'rematchOffer',
+          from: state.username,
+          gameId: prev.id,
+          timeControl: prev.timeControl,
+          rated: prev.rated,
+        });
+      }
+      return send(ws, { type: 'rematchPending' });
     }
 
     case 'move': {

@@ -3,6 +3,7 @@
 const express = require('express');
 const { many, one } = require('../db/pool');
 const { games } = require('../gameManager');
+const { optionalAuth } = require('../auth');
 
 const router = express.Router();
 
@@ -35,26 +36,18 @@ router.get('/live', (req, res) => {
   res.json({ games: live.slice(0, 30) });
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', optionalAuth, async (req, res) => {
   const live = games.get(req.params.id);
   if (live) {
+    let yourColor = null;
+    if (req.user) {
+      if (req.user.id === live.whiteId) yourColor = 'white';
+      else if (req.user.id === live.blackId) yourColor = 'black';
+    }
     return res.json({
       live: true,
-      game: {
-        id: live.id,
-        white: live.whiteName,
-        black: live.blackName,
-        whiteRating: live.whiteRating,
-        blackRating: live.blackRating,
-        timeControl: live.timeControl,
-        category: live.category,
-        fen: live.core.fen,
-        pgn: live.core.pgn,
-        moves: live.core.history(),
-        ended: live.ended,
-        result: live.result,
-        winner: live.winner,
-      }
+      yourColor,
+      game: live.snapshot(),
     });
   }
   const game = await one('SELECT * FROM games WHERE id = $1', [req.params.id]);

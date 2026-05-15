@@ -1,4 +1,4 @@
-import { PIECES } from './pieces.js';
+import { getPieceSet } from './pieces.js';
 
 const FILES = ['a','b','c','d','e','f','g','h'];
 const RANKS = ['1','2','3','4','5','6','7','8'];
@@ -7,6 +7,8 @@ export class Board {
   constructor(el, opts = {}) {
     this.el = el;
     this.orientation = opts.orientation || 'white';
+    this.pieceSet = opts.pieceSet || 'classic';
+    this.pieces = getPieceSet(this.pieceSet);
     this.onMove = opts.onMove || (() => {});
     this.interactive = opts.interactive !== false;
     this.chess = new window.Chess();
@@ -65,6 +67,12 @@ export class Board {
   setOrientation(color) {
     this.orientation = color;
     this._build();
+    this.render();
+  }
+
+  setPieceSet(name) {
+    this.pieceSet = name || 'classic';
+    this.pieces = getPieceSet(this.pieceSet);
     this.render();
   }
 
@@ -147,7 +155,7 @@ export class Board {
         pieceEl.dataset.color = p.color;
         pieceEl.dataset.type = p.type;
         const key = (p.color === 'w' ? 'w' : 'b') + p.type.toUpperCase();
-        pieceEl.style.backgroundImage = `url("${PIECES[key]}")`;
+        pieceEl.style.backgroundImage = `url("${this.pieces[key]}")`;
         sqEl.appendChild(pieceEl);
       }
     }
