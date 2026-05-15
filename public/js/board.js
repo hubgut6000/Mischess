@@ -2,6 +2,23 @@ import { getPieceSet } from './pieces.js';
 
 const FILES = ['a','b','c','d','e','f','g','h'];
 const RANKS = ['1','2','3','4','5','6','7','8'];
+const FLAG_KSIDE_CASTLE = 32;
+const FLAG_QSIDE_CASTLE = 64;
+
+function isCastleMove(flags) {
+  if (typeof flags === 'string') return flags.includes('k') || flags.includes('q');
+  return !!(flags & (FLAG_KSIDE_CASTLE | FLAG_QSIDE_CASTLE));
+}
+
+function isKingsideCastle(flags) {
+  if (typeof flags === 'string') return flags.includes('k');
+  return !!(flags & FLAG_KSIDE_CASTLE);
+}
+
+function isQueensideCastle(flags) {
+  if (typeof flags === 'string') return flags.includes('q');
+  return !!(flags & FLAG_QSIDE_CASTLE);
+}
 
 export class Board {
   constructor(el, opts = {}) {
@@ -73,115 +90,112 @@ export class Board {
   }
 
   setPosition(fen, opts = {}) {
-    const prevFen = this.chess.fen();
-    const instant = opts.instant === true;
-    const animate = opts.animate !== false && !instant && prevFen && prevFen !== fen;
-
-    if (animate) {
-      const move = this._detectMove(prevFen, fen);
-      if (move) {
-        this._playMoveAnimation(move, fen);
-        return;
-      }
+    if (this.animating) {
+      this.animating = false;
+      this.el.classList.remove('board-animating');
     }
 
+    const prevFen = this.chess.fen();
+    const instant = opts.instant === true;
+    const canAnimate = opts.animate !== false && !instant && prevFen && prevFen !== fen;
+    const move = canAnimate ? this._detectMove(prevFen, fen) : null;
+
+    // Always sync board state and DOM immediately so pieces never stay stuck
     this.chess.load(fen);
     this.selected = null;
     this.legalTargets = [];
-    this.render();
+
+    if (move) {
+      this._playFlipAnimation(move);
+    } else {
+      this.render();
+      this._animateLastMove();
+    }
+  }
+
+  _fenPosition(fen) {
+    return fen.split(' ').slice(0, 4).join(' ');
   }
 
   _detectMove(fromFen, toFen) {
     try {
+      const target = this._fenPosition(toFen);
       const probe = new window.Chess(fromFen);
       for (const m of probe.moves({ verbose: true })) {
         const trial = new window.Chess(fromFen);
         trial.move(m);
-        if (trial.fen() === toFen) return m;
+        if (this._fenPosition(trial.fen()) === target) return m;
       }
     } catch {}
     return null;
   }
 
-  _playMoveAnimation(move, targetFen) {
-    if (this.animating) {
-      this.chess.load(targetFen);
-      this.render();
-      return;
+  _playFlipAnimation(move) {
+    const { from, to, flags } = move;
+    this.render();
+
+    const slides = [];
+    const pieceEl = this.squareEls[to]?.querySelector('.piece');
+    if (pieceEl) slides.push({ el: pieceEl, from, to });
+
+    if (isCastleMove(flags)) {
+      const rook = this._castleRookSquares(from, flags);
+      const rookEl = this.squareEls[rook.to]?.querySelector('.piece');
+      if (rookEl) slides.push({ el: rookEl, from: rook.from, to: rook.to });
     }
 
-    const { from, to, captured, flags } = move;
-    const isCastle = flags.includes('k') || flags.includes('q');
-    const castleRook = isCastle ? this._castleRookSquares(from, to, flags) : null;
-
-    const fromEl = this.squareEls[from];
-    const pieceEl = fromEl?.querySelector('.piece');
-    if (!pieceEl) {
-      this.chess.load(targetFen);
-      this.render();
+    if (!slides.length) {
+      this._animateLastMove();
       return;
     }
 
     this.animating = true;
     this.el.classList.add('board-animating');
 
-    const duration = this.moveDuration;
-    const easing = 'cubic-bezier(0.25, 0.85, 0.35, 1)';
-
-    const capEl = captured ? this.squareEls[to]?.querySelector('.piece') : null;
-    if (capEl && capEl !== pieceEl) {
-      capEl.classList.add('piece-capture');
-    }
-
-    const slides = [{ el: pieceEl, from, to }];
-
-    if (castleRook) {
-      const rookEl = this.squareEls[castleRook.from]?.querySelector('.piece');
-      if (rookEl) slides.push({ el: rookEl, from: castleRook.from, to: castleRook.to });
-    }
-
-    let done = 0;
-    const onSlideEnd = () => {
-      done++;
-      if (done < slides.length) return;
+    let finished = 0;
+    const onDone = () => {
+      finished++;
+      if (finished < slides.length) return;
       this.animating = false;
       this.el.classList.remove('board-animating');
-      this.chess.load(targetFen);
-      this.render();
       this._animateLastMove();
     };
 
     for (const { el, from: f, to: t } of slides) {
-      this._slidePiece(el, f, t, duration, easing, onSlideEnd);
+      this._flipPiece(el, f, t, onDone);
     }
   }
 
-  _castleRookSquares(kingFrom, _kingTo, flags) {
+  _castleRookSquares(kingFrom, flags) {
     const rank = kingFrom[1];
-    if (flags.includes('k')) return { from: 'h' + rank, to: 'f' + rank };
-    if (flags.includes('q')) return { from: 'a' + rank, to: 'd' + rank };
+    if (isKingsideCastle(flags)) return { from: 'h' + rank, to: 'f' + rank };
+    if (isQueensideCastle(flags)) return { from: 'a' + rank, to: 'd' + rank };
     return null;
   }
 
-  _slidePiece(pieceEl, from, to, duration, easing, onDone) {
+  _flipPiece(pieceEl, from, to, onDone) {
     const fromRect = this.squareEls[from].getBoundingClientRect();
     const toRect = this.squareEls[to].getBoundingClientRect();
-    const dx = toRect.left - fromRect.left;
-    const dy = toRect.top - fromRect.top;
+    const dx = fromRect.left - toRect.left;
+    const dy = fromRect.top - toRect.top;
+    const duration = this.moveDuration;
+    const easing = 'cubic-bezier(0.25, 0.85, 0.35, 1)';
 
     pieceEl.classList.add('piece-sliding');
-    pieceEl.style.transition = `transform ${duration}ms ${easing}`;
+    pieceEl.style.transition = 'none';
+    pieceEl.style.transform = `translate(${dx}px, ${dy}px)`;
     pieceEl.style.zIndex = '50';
-    pieceEl.style.willChange = 'transform';
 
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        pieceEl.style.transform = `translate(${dx}px, ${dy}px)`;
+        pieceEl.style.transition = `transform ${duration}ms ${easing}`;
+        pieceEl.style.transform = '';
       });
     });
 
     let done = false;
-    const finish = () => {
+    const finish = (ev) => {
+      if (ev && ev.propertyName && ev.propertyName !== 'transform') return;
       if (done) return;
       done = true;
       pieceEl.removeEventListener('transitionend', finish);
@@ -189,11 +203,10 @@ export class Board {
       pieceEl.style.transition = '';
       pieceEl.style.transform = '';
       pieceEl.style.zIndex = '';
-      pieceEl.style.willChange = '';
       onDone();
     };
     pieceEl.addEventListener('transitionend', finish);
-    setTimeout(finish, duration + 100);
+    setTimeout(finish, duration + 120);
   }
 
   setLastMove(from, to, opts = {}) {
@@ -412,7 +425,13 @@ export class Board {
   }
 
   _dispatchMove(moveObj) {
-    const result = this.onMove(moveObj);
+    let result;
+    try {
+      result = this.onMove(moveObj);
+    } catch (err) {
+      console.error('onMove failed', err);
+      result = false;
+    }
     this.selected = null;
     this.legalTargets = [];
     if (result === false) this.render();

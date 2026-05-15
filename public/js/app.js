@@ -2374,7 +2374,12 @@ function renderGamePage(game) {
     onMove: (move) => {
       if (!isPlayer) return false;
       if (state.telemetry) state.telemetry.onBeforeMove();
+      const res = board.chess.move(move);
+      if (!res) return false;
       sendWs({ type: 'move', move });
+      board.setLastMove(res.from, res.to, { captured: !!res.captured });
+      board.setPosition(board.chess.fen());
+      return true;
     },
   });
   state.board = board;
