@@ -3,7 +3,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { query, one } = require('../db/pool');
-const { hashPassword, verifyPassword, signToken, authMiddleware } = require('../auth');
+const { hashPassword, verifyPassword, signToken, optionalAuth } = require('../auth');
 const { generateCsrfToken, setCsrfCookie } = require('../csrf');
 const { recordIp } = require('../ipTrack');
 
@@ -114,12 +114,11 @@ router.post('/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-router.get('/me', async (req, res) => {
+router.get('/me', optionalAuth, async (req, res) => {
   // Always set a fresh CSRF token (called on page load to bootstrap)
   const csrf = generateCsrfToken();
   setCsrfCookie(res, csrf);
-  
-  // If authenticated, return user data
+
   if (req.user) {
     const user = await one(
       `SELECT id, username, email, bio, country, title, theme, piece_set,
@@ -129,10 +128,11 @@ router.get('/me', async (req, res) => {
       [req.user.id]
     );
     if (!user) return res.status(404).json({ error: 'User not found', csrf });
-    return res.json({ user, csrf });
+    const token = signToken({ id: user.id, username: user.username });
+    setCookie(res, token);
+    return res.json({ user, token, csrf });
   }
-  
-  // Not authenticated, just return CSRF token for register/login forms
+
   res.json({ csrf });
 });
 

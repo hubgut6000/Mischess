@@ -209,17 +209,32 @@ function saveToken(t) { try { t ? localStorage.setItem('mischess:token', t) : lo
 
 async function checkAuth() {
   state.token = loadToken();
-  if (!state.token) return;
   try {
-    const { user } = await api('/api/auth/me');
-    state.user = user;
-    // Apply user's saved theme
-    if (user.theme) applyTheme(user.theme);
+    const data = await api('/api/auth/me');
+    if (data.user) {
+      state.user = data.user;
+      if (data.token) {
+        state.token = data.token;
+        saveToken(data.token);
+      }
+      if (data.user.theme) applyTheme(data.user.theme);
+    } else {
+      state.user = null;
+      if (state.token) {
+        state.token = null;
+        saveToken(null);
+      }
+    }
     renderAuthArea();
   } catch (e) {
-    state.token = null;
-    state.user = null;
-    saveToken(null);
+    // Keep session on transient errors; only clear when the server rejects auth
+    const msg = String(e.message || '');
+    if (msg.includes('401') || msg.includes('Not authenticated') || msg.includes('Invalid token')) {
+      state.token = null;
+      state.user = null;
+      saveToken(null);
+      renderAuthArea();
+    }
   }
 }
 

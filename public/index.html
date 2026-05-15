@@ -86,60 +86,44 @@
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
   <div id="cheat-warning-mount"></div>
-  <div id="update-banner-mount"></div>
 
   <script src="/js/chess.min.js"></script>
   <script src="/js/app.js" type="module"></script>
 
   <script>
-    // ----- Service Worker registration with update prompt -----
+    // Auto-apply service worker updates (no manual hard refresh)
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', async () => {
-        try {
-          const reg = await navigator.serviceWorker.register('/sw.js');
-          // Listen for new SW versions
-          reg.addEventListener('updatefound', () => {
-            const newWorker = reg.installing;
-            if (!newWorker) return;
-            newWorker.addEventListener('statechange', () => {
-              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                showUpdateBanner(newWorker);
-              }
-            });
-          });
-          // Check for updates every 60s while open
-          setInterval(() => reg.update().catch(() => {}), 60_000);
-        } catch (e) {
-          console.warn('[sw] registration failed', e);
-        }
-      });
-
-      // Reload page once the new SW takes control (after user accepts)
       let refreshing = false;
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (refreshing) return;
         refreshing = true;
         window.location.reload();
       });
-    }
 
-    function showUpdateBanner(worker) {
-      const mount = document.getElementById('update-banner-mount');
-      if (!mount) return;
-      mount.innerHTML = '';
-      const banner = document.createElement('div');
-      banner.className = 'update-banner';
-      banner.innerHTML = `
-        <span class="update-text">A new version of Mischess is available.</span>
-        <button class="btn btn-primary btn-sm" id="update-refresh">Refresh</button>
-        <button class="btn btn-ghost btn-sm" id="update-dismiss" aria-label="Dismiss">&times;</button>
-      `;
-      mount.appendChild(banner);
-      document.getElementById('update-refresh').addEventListener('click', () => {
-        worker.postMessage({ type: 'SKIP_WAITING' });
-      });
-      document.getElementById('update-dismiss').addEventListener('click', () => {
-        banner.remove();
+      function activateWaiting(reg) {
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      }
+
+      window.addEventListener('load', async () => {
+        try {
+          const reg = await navigator.serviceWorker.register('/sw.js');
+          activateWaiting(reg);
+
+          reg.addEventListener('updatefound', () => {
+            const nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', () => {
+              if (nw.state === 'installed') activateWaiting(reg);
+            });
+          });
+
+          setInterval(() => reg.update().catch(() => {}), 60_000);
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') reg.update().catch(() => {});
+          });
+        } catch (e) {
+          console.warn('[sw] registration failed', e);
+        }
       });
     }
   </script>
