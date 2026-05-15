@@ -673,6 +673,12 @@ p strong { color: var(--ink-1); font-weight: 600; }
   box-shadow: 0 0 0 3px var(--accent-faint);
 }
 .tc-card.selected::before { opacity: 1; }
+.tc-card-dummy .tc-time { color: #9aab6e; }
+.tc-card-dummy .tc-cat { color: #7a8a55; }
+.tc-card-dummy.selected {
+  border-color: #8a9a5a;
+  box-shadow: 0 0 0 3px rgba(120, 140, 70, 0.25);
+}
 .tc-time {
   font-family: var(--font-serif);
   font-size: 1.55rem;

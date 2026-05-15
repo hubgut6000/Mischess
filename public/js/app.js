@@ -10,6 +10,7 @@ import {
   thinkingLabel,
   categoryFromTime,
   sleep,
+  pickDummyMove,
 } from './humanAi.js';
 
 // ---------- State ----------
@@ -905,6 +906,7 @@ route('/play/ai', async () => {
 
   // Elo presets — map to Stockfish Skill Level and search depth
   const PRESETS = [
+    { label: 'Dummy',        elo: 100,  skill: 0,  depth: 1,  dummy: true },
     { label: 'Beginner',     elo: 800,  skill: 0,  depth: 3  },
     { label: 'Casual',       elo: 1200, skill: 3,  depth: 4  },
     { label: 'Club player',  elo: 1500, skill: 6,  depth: 6  },
@@ -918,7 +920,7 @@ route('/play/ai', async () => {
 
   const grid = h('div', { class: 'tc-grid' });
   PRESETS.forEach(p => {
-    const c = h('div', { class: 'tc-card' + (p === selected ? ' selected' : ''), onclick: () => {
+    const c = h('div', { class: 'tc-card' + (p.dummy ? ' tc-card-dummy' : '') + (p === selected ? ' selected' : ''), onclick: () => {
       selected = p;
       $$('.tc-card', grid).forEach(x => x.classList.remove('selected'));
       c.classList.add('selected');
@@ -958,25 +960,27 @@ async function startAiGame(preset, playerColor, opts = {}) {
     return;
   }
 
-  if (!state.stockfish) {
-    state.stockfish = new StockfishEngine();
-    if (!opts.isGhost) toast('Loading engine...', 'info');
-  }
-  try {
-    await state.stockfish.init();
-    if (state.stockfish.useFallback && !opts.isGhost) {
-      toast('Using fallback AI (Stockfish unavailable)', 'info');
+  if (!preset.dummy) {
+    if (!state.stockfish) {
+      state.stockfish = new StockfishEngine();
+      if (!opts.isGhost) toast('Loading engine...', 'info');
     }
-  } catch (e) {
-    console.error('Stockfish init error:', e);
-    toast('Engine failed to load, using fallback AI', 'error');
+    try {
+      await state.stockfish.init();
+      if (state.stockfish.useFallback && !opts.isGhost) {
+        toast('Using fallback AI (Stockfish unavailable)', 'info');
+      }
+    } catch (e) {
+      console.error('Stockfish init error:', e);
+      toast('Engine failed to load, using fallback AI', 'error');
+    }
+    state.stockfish.newGame();
+    state.stockfish.setSkillLevel(preset.skill);
+    state.stockfish.setElo(preset.elo);
   }
-  state.stockfish.newGame();
-  state.stockfish.setSkillLevel(preset.skill);
-  state.stockfish.setElo(preset.elo);
 
   const opponent = opts.opponent || {
-    username: `Stockfish (${preset.label})`,
+    username: preset.dummy ? 'Dummy' : `Stockfish (${preset.label})`,
     rating: preset.elo,
     elo: preset.elo,
     skill: preset.skill,
@@ -1111,16 +1115,22 @@ async function requestAiMove(aiGame, board, moveList) {
       ply,
       lastMove: aiGame.lastMove,
     });
-    const movetime = engineMoveTime(elo, ply);
-    const engine = state.stockfish;
 
-    const [moveUci] = await Promise.all([
-      engine.getBestMove(aiGame.chess.fen(), {
-        depth: aiGame.preset.depth,
-        movetime,
-      }),
-      sleep(thinkMs),
-    ]);
+    let moveUci;
+    if (aiGame.preset.dummy) {
+      await sleep(thinkMs);
+      moveUci = pickDummyMove(aiGame.chess);
+    } else {
+      const movetime = engineMoveTime(elo, ply);
+      const engine = state.stockfish;
+      [moveUci] = await Promise.all([
+        engine.getBestMove(aiGame.chess.fen(), {
+          depth: aiGame.preset.depth,
+          movetime,
+        }),
+        sleep(thinkMs),
+      ]);
+    }
 
     if (!moveUci) return;
 

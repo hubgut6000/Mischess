@@ -68,7 +68,65 @@ export function generateHumanOpponent(targetElo) {
  * @param {import('chess.js').Chess} chess
  * @param {{ elo: number, ply: number, lastMove?: object }} ctx
  */
+/** Deliberately awful move picker for the 100-Elo "Dummy" bot. */
+export function pickDummyMove(chess) {
+  const moves = chess.moves({ verbose: true });
+  if (!moves.length) return null;
+
+  const toUci = (m) => m.from + m.to + (m.promotion || '');
+
+  const givesMate = (m) => {
+    const c = new window.Chess(chess.fen());
+    c.move(m);
+    return c.isCheckmate();
+  };
+
+  const mates = moves.filter(givesMate);
+  let pool = moves;
+  // Often refuses the obvious mate
+  if (mates.length && Math.random() < 0.5) {
+    pool = moves.filter(m => !mates.includes(m));
+    if (!pool.length) pool = moves;
+  }
+
+  if (Math.random() < 0.55) {
+    return toUci(pool[Math.floor(Math.random() * pool.length)]);
+  }
+
+  const color = chess.turn();
+  const scored = pool.map(m => {
+    const c = new window.Chess(chess.fen());
+    c.move(m);
+    let s = _materialFor(c, color);
+    s += (Math.random() - 0.25) * 700;
+    if (m.san.includes('+')) s += 150;
+    if (m.san.includes('#')) s += 500;
+    if (m.captured) s -= Math.random() * 120;
+    return { m, s };
+  });
+
+  scored.sort((a, b) => a.s - b.s);
+  const worst = scored.slice(0, Math.max(1, Math.ceil(scored.length * 0.4)));
+  return toUci(worst[Math.floor(Math.random() * worst.length)].m);
+}
+
+function _materialFor(chess, color) {
+  const vals = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+  let score = 0;
+  for (const row of chess.board()) {
+    for (const p of row) {
+      if (!p) continue;
+      const v = vals[p.type];
+      score += p.color === color ? v : -v;
+    }
+  }
+  if (chess.inCheck() && chess.turn() === color) score -= 3;
+  return score;
+}
+
 export function computeHumanThinkTime(chess, { elo, ply, lastMove }) {
+  if (elo <= 150) return rand(120, 520);
+
   const legalCount = chess.moves().length;
   const eloFactor = 0.55 + (Math.max(800, elo) - 800) / 2000;
 
@@ -118,6 +176,7 @@ export function engineMoveTime(elo, ply) {
 
 /** Status text while "thinking". */
 export function thinkingLabel(elo, ply) {
+  if (elo <= 150) return pick(['...', 'huh?', 'durrr', 'zoning out', 'thinking?']);
   if (ply < 6) return pick(['considering...', 'thinking', 'hmm...']);
   if (Math.random() < 0.2) return pick(['calculating...', 'thinking hard', 'one moment']);
   return 'thinking';
