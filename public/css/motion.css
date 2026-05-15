@@ -9,6 +9,9 @@
   --dur-slow: 0.62s;
   --dur-page: 0.55s;
   --stagger-step: 0.055s;
+  --piece-move-ms: 580ms;
+  --piece-land: 0.52s;
+  --piece-capture: 0.42s;
   --page-max: 1180px;
   --content-narrow: 760px;
   --content-form: 440px;
@@ -308,12 +311,20 @@
 
 .piece {
   transition:
-    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
-    filter var(--dur-fast) var(--ease);
+    transform var(--piece-move-ms) cubic-bezier(0.25, 0.85, 0.35, 1),
+    filter var(--dur-normal) var(--ease);
+}
+
+.piece-sliding {
+  pointer-events: none;
+}
+
+.board-animating .piece:not(.piece-sliding) {
+  pointer-events: none;
 }
 
 .piece-arrive {
-  animation: pieceLand 0.32s var(--ease-spring) forwards;
+  animation: pieceLand var(--piece-land) var(--ease-spring) forwards;
 }
 
 @keyframes pieceLand {
@@ -331,7 +342,8 @@
 }
 
 .piece-capture {
-  animation: pieceCapture 0.25s var(--ease) forwards;
+  animation: pieceCapture var(--piece-capture) var(--ease) forwards;
+  pointer-events: none;
 }
 
 @keyframes pieceCapture {
@@ -344,7 +356,7 @@
 
 .square.move-from::before,
 .square.move-to::before {
-  animation: squareFlash 0.5s var(--ease) forwards;
+  animation: squareFlash 0.72s var(--ease) forwards;
 }
 
 @keyframes squareFlash {

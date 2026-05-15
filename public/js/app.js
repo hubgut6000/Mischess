@@ -21,6 +21,7 @@ const state = {
   game: null,          // current game snapshot
   gameTimers: null,
   board: null,
+  homeBoard: null,
   playerColor: null,
   focusBlurListener: null,
   stockfish: null,     // persistent engine instance
@@ -34,6 +35,13 @@ const state = {
 
 function getActivePieceSet() {
   return state.user?.piece_set || state.settings.boardTheme || 'classic';
+}
+
+function applyPieceSet(id) {
+  state.settings.boardTheme = id;
+  saveSettings();
+  if (state.board) state.board.setPieceSet(id);
+  if (state.homeBoard) state.homeBoard.setPieceSet(id);
 }
 
 function persistActiveGame(id) {
@@ -591,7 +599,8 @@ route('/', async () => {
     if (!wrap) return;
     const boardEl = document.createElement('div');
     wrap.appendChild(boardEl);
-    const board = new Board(boardEl, { interactive: false });
+    const board = new Board(boardEl, { interactive: false, pieceSet: getActivePieceSet() });
+    state.homeBoard = board;
     const famous = ['e4','c5','Nf3','d6','d4','cxd4','Nxd4','Nf6','Nc3','a6','Be2','e5','Nb3','Be7','O-O','O-O'];
     let i = 0;
     let inCycle = false;
@@ -606,8 +615,13 @@ route('/', async () => {
         return;
       }
       inCycle = true;
-      const m = board.chess.move(famous[i]);
-      if (m) { board.setLastMove(m.from, m.to); board.render(); }
+      const prevFen = board.getFen();
+      const temp = new window.Chess(prevFen);
+      const m = temp.move(famous[i]);
+      if (m) {
+        board.setLastMove(m.from, m.to, { captured: !!m.captured });
+        board.setPosition(temp.fen());
+      }
       i++;
     }, 2800);
   }, 100);
@@ -1030,7 +1044,7 @@ function renderAiGameView(aiGame) {
       aiGame.chess = new window.Chess();
       aiGame.history = [];
       for (const m of target) { aiGame.chess.move(m); aiGame.history.push(m); }
-      state.board.setPosition(aiGame.chess.fen());
+      state.board.setPosition(aiGame.chess.fen(), { instant: true });
       renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     }}, 'Undo'),
     h('button', { class: 'btn btn-ghost btn-sm', onclick: () => navigate('#/play/ai') }, 'New'),
@@ -1057,12 +1071,11 @@ function renderAiGameView(aiGame) {
         else sound.move();
         if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
       }
-      board.setLastMove(res.from, res.to);
+      board.setLastMove(res.from, res.to, { captured: !!res.captured });
       board.setPosition(aiGame.chess.fen());
       renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
       checkAiGameEnd(aiGame);
       if (!aiGame.chess.isGameOver()) {
-        // Async AI move — UI stays fluid
         requestAiMove(aiGame, board, moveList);
       }
       return true;
@@ -1124,8 +1137,8 @@ async function requestAiMove(aiGame, board, moveList) {
       else sound.move();
       if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
     }
-    board.setPosition(aiGame.chess.fen());
     board.setLastMove(res.from, res.to, { captured: !!res.captured });
+    board.setPosition(aiGame.chess.fen());
     renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     checkAiGameEnd(aiGame);
   } catch (e) {
@@ -1325,6 +1338,7 @@ function startCustomAiGame(fen, name, rules = {}) {
 
   const board = new Board(boardEl, {
     orientation: 'white',
+    pieceSet: getActivePieceSet(),
     onMove: (move) => handleCustomMove(aiGame, board, moveList, move),
   });
   state.board = board;
@@ -1336,8 +1350,8 @@ function handleCustomMove(aiGame, board, moveList, move) {
   const res = aiGame.chess.move(move);
   if (!res) return false;
   aiGame.history.push(res.san);
+  board.setLastMove(res.from, res.to, { captured: !!res.captured });
   board.setPosition(aiGame.chess.fen());
-  board.setLastMove(res.from, res.to);
   renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
 
   // Apply custom rules
@@ -1377,8 +1391,8 @@ function handleCustomMove(aiGame, board, moveList, move) {
     if (!m) return;
     const r2 = aiGame.chess.move(m);
     aiGame.history.push(r2.san);
+    board.setLastMove(r2.from, r2.to, { captured: !!r2.captured });
     board.setPosition(aiGame.chess.fen());
-    board.setLastMove(r2.from, r2.to);
     renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     if (aiGame.rules.threeCheck && r2.san.includes('+')) {
       aiGame.checksGiven[r2.color]++;
@@ -1392,6 +1406,7 @@ function handleCustomMove(aiGame, board, moveList, move) {
       showGameEndModal(msg, () => navigate('#/play/custom'));
     }
   }, 400);
+  return true;
 }
 
 // FRIEND CHALLENGE
@@ -2204,7 +2219,7 @@ function renderFinishedGame(game) {
   view.appendChild(sideCol);
 
   // Build board
-  const board = new Board(boardEl, { interactive: false });
+  const board = new Board(boardEl, { interactive: false, pieceSet: getActivePieceSet() });
 
   function goToPly(ply) {
     ply = Math.max(0, Math.min(history.length, ply));
@@ -2435,13 +2450,13 @@ function onGameUpdate(game, lastMove) {
   const prevMoveCount = state.game ? state.game.moves.length : 0;
   state.game = game;
   if (state.board) {
-    state.board.setPosition(game.fen);
     if (lastMove) {
       const lastSan = game.moves[game.moves.length - 1] || '';
       state.board.setLastMove(lastMove.from, lastMove.to, {
         captured: !!(lastMove.captured || lastSan.includes('x')),
       });
     }
+    state.board.setPosition(game.fen);
   }
   const movesEl = $('.move-list');
   if (movesEl) renderMoveList(movesEl, game.fen, game.moves);
@@ -2671,18 +2686,16 @@ route('/settings', async () => {
   PIECES_OPTS.forEach(p => {
     const opt = h('div', {
       class: 'theme-option' + (p.id === curPiece ? ' active' : ''),
+      'data-piece': p.id,
       onclick: async () => {
-        state.settings.boardTheme = p.id;
-        saveSettings();
-        if (state.board) state.board.setPieceSet(p.id);
-        $('.theme-option', pieceGrid).forEach(x => x.classList.remove('active'));
-        opt.classList.add('active');
+        applyPieceSet(p.id);
+        $$('.theme-option', pieceGrid).forEach(x => x.classList.toggle('active', x.getAttribute('data-piece') === p.id));
         sound.click();
         if (state.user) {
           try { await api('/api/users/me', { method: 'PUT', body: { piece_set: p.id } }); state.user.piece_set = p.id; } catch {}
         }
       },
-    }, h('div', { class: 'theme-swatch' }), h('div', { class: 'theme-name' }, p.name));
+    }, h('div', { class: 'theme-swatch piece-swatch-' + p.id }), h('div', { class: 'theme-name' }, p.name));
     pieceGrid.appendChild(opt);
   });
   pieceSection.appendChild(pieceGrid);

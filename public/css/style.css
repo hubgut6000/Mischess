@@ -995,7 +995,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
   background-position: center;
   cursor: grab;
   z-index: 2;
-  transition: transform 0.2s var(--ease), filter 0.15s var(--ease);
+  transition: transform 0.35s var(--ease), filter 0.25s var(--ease);
   pointer-events: none;
   filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.3));
 }
@@ -1519,6 +1519,10 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
 .theme-option[data-preview="ocean"] .theme-swatch::after { content: ''; flex: 1; }
 .theme-option[data-preview="ocean"] .theme-swatch::before { background: #d0e0eb; }
 .theme-option[data-preview="ocean"] .theme-swatch::after { background: #6891af; }
+
+.piece-swatch-classic { background: linear-gradient(135deg, #fffbef 50%, #1d1a15 50%); }
+.piece-swatch-neo { background: linear-gradient(135deg, #e3f0ff 50%, #152232 50%); }
+.piece-swatch-wood { background: linear-gradient(135deg, #f3e6c8 50%, #5a3b28 50%); }
 
 .toggle-row {
   display: flex;

@@ -11,6 +11,7 @@ export class Board {
     this.pieces = getPieceSet(this.pieceSet);
     this.onMove = opts.onMove || (() => {});
     this.interactive = opts.interactive !== false;
+    this.moveDuration = opts.moveDuration ?? 580;
     this.chess = new window.Chess();
     this.selected = null;
     this.legalTargets = [];
@@ -18,8 +19,7 @@ export class Board {
     this.dragState = null;
     this.promotionPending = null;
     this.squareEls = {};
-    this.animatingPieces = new Set();
-    this.previousBoard = null;
+    this.animating = false;
     this._build();
     this._bindEvents();
     this.render();
@@ -30,9 +30,6 @@ export class Board {
     this.el.innerHTML = '';
     this.squareEls = {};
 
-    // Build squares in correct order for orientation.
-    // White at bottom: iterate ranks 8->1, files a->h (reading order from white's view)
-    // Black at bottom: iterate ranks 1->8, files h->a
     const ranks = this.orientation === 'white' ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
     const files = this.orientation === 'white' ? [0,1,2,3,4,5,6,7] : [7,6,5,4,3,2,1,0];
 
@@ -43,7 +40,6 @@ export class Board {
         sq.className = 'square ' + ((f + r) % 2 === 0 ? 'dark' : 'light');
         sq.dataset.square = algebraic;
 
-        // Coordinate labels - show on appropriate edge based on orientation
         const showFile = (this.orientation === 'white' ? r === 0 : r === 7);
         const showRank = (this.orientation === 'white' ? f === 0 : f === 7);
         if (showRank) {
@@ -76,29 +72,133 @@ export class Board {
     this.render();
   }
 
-  setPosition(fen) {
+  setPosition(fen, opts = {}) {
     const prevFen = this.chess.fen();
+    const instant = opts.instant === true;
+    const animate = opts.animate !== false && !instant && prevFen && prevFen !== fen;
+
+    if (animate) {
+      const move = this._detectMove(prevFen, fen);
+      if (move) {
+        this._playMoveAnimation(move, fen);
+        return;
+      }
+    }
+
     this.chess.load(fen);
     this.selected = null;
     this.legalTargets = [];
-    // Animate if this is a direct follow-up position
-    if (prevFen && prevFen !== fen) {
-      this._animateTransition(prevFen, fen);
-    } else {
+    this.render();
+  }
+
+  _detectMove(fromFen, toFen) {
+    try {
+      const probe = new window.Chess(fromFen);
+      for (const m of probe.moves({ verbose: true })) {
+        const trial = new window.Chess(fromFen);
+        trial.move(m);
+        if (trial.fen() === toFen) return m;
+      }
+    } catch {}
+    return null;
+  }
+
+  _playMoveAnimation(move, targetFen) {
+    if (this.animating) {
+      this.chess.load(targetFen);
       this.render();
+      return;
+    }
+
+    const { from, to, captured, flags } = move;
+    const isCastle = flags.includes('k') || flags.includes('q');
+    const castleRook = isCastle ? this._castleRookSquares(from, to, flags) : null;
+
+    const fromEl = this.squareEls[from];
+    const pieceEl = fromEl?.querySelector('.piece');
+    if (!pieceEl) {
+      this.chess.load(targetFen);
+      this.render();
+      return;
+    }
+
+    this.animating = true;
+    this.el.classList.add('board-animating');
+
+    const duration = this.moveDuration;
+    const easing = 'cubic-bezier(0.25, 0.85, 0.35, 1)';
+
+    const capEl = captured ? this.squareEls[to]?.querySelector('.piece') : null;
+    if (capEl && capEl !== pieceEl) {
+      capEl.classList.add('piece-capture');
+    }
+
+    const slides = [{ el: pieceEl, from, to }];
+
+    if (castleRook) {
+      const rookEl = this.squareEls[castleRook.from]?.querySelector('.piece');
+      if (rookEl) slides.push({ el: rookEl, from: castleRook.from, to: castleRook.to });
+    }
+
+    let done = 0;
+    const onSlideEnd = () => {
+      done++;
+      if (done < slides.length) return;
+      this.animating = false;
+      this.el.classList.remove('board-animating');
+      this.chess.load(targetFen);
+      this.render();
+      this._animateLastMove();
+    };
+
+    for (const { el, from: f, to: t } of slides) {
+      this._slidePiece(el, f, t, duration, easing, onSlideEnd);
     }
   }
 
-  _animateTransition(prevFen, newFen) {
-    // Simple approach: render new position, then piece CSS transitions handle the rest.
-    // For proper animation we'd need to track moved pieces. Keep it simple for now.
-    this.render();
+  _castleRookSquares(kingFrom, _kingTo, flags) {
+    const rank = kingFrom[1];
+    if (flags.includes('k')) return { from: 'h' + rank, to: 'f' + rank };
+    if (flags.includes('q')) return { from: 'a' + rank, to: 'd' + rank };
+    return null;
+  }
+
+  _slidePiece(pieceEl, from, to, duration, easing, onDone) {
+    const fromRect = this.squareEls[from].getBoundingClientRect();
+    const toRect = this.squareEls[to].getBoundingClientRect();
+    const dx = toRect.left - fromRect.left;
+    const dy = toRect.top - fromRect.top;
+
+    pieceEl.classList.add('piece-sliding');
+    pieceEl.style.transition = `transform ${duration}ms ${easing}`;
+    pieceEl.style.zIndex = '50';
+    pieceEl.style.willChange = 'transform';
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        pieceEl.style.transform = `translate(${dx}px, ${dy}px)`;
+      });
+    });
+
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      pieceEl.removeEventListener('transitionend', finish);
+      pieceEl.classList.remove('piece-sliding');
+      pieceEl.style.transition = '';
+      pieceEl.style.transform = '';
+      pieceEl.style.zIndex = '';
+      pieceEl.style.willChange = '';
+      onDone();
+    };
+    pieceEl.addEventListener('transitionend', finish);
+    setTimeout(finish, duration + 100);
   }
 
   setLastMove(from, to, opts = {}) {
     this.lastMove = from && to ? { from, to, captured: !!opts.captured } : null;
     this._refreshHighlights();
-    this._animateLastMove();
   }
 
   getFen() { return this.chess.fen(); }
@@ -136,7 +236,6 @@ export class Board {
   }
 
   render() {
-    // Clear pieces
     for (const sq of Object.values(this.squareEls)) {
       const p = sq.querySelector('.piece');
       if (p) p.remove();
@@ -160,11 +259,11 @@ export class Board {
       }
     }
     this._refreshHighlights();
-    this._animateLastMove();
+    if (!this.animating) this._animateLastMove();
   }
 
   _animateLastMove() {
-    if (!this.lastMove?.to) return;
+    if (!this.lastMove?.to || this.animating) return;
     const sq = this.squareEls[this.lastMove.to];
     if (!sq) return;
     const piece = sq.querySelector('.piece');
@@ -173,10 +272,6 @@ export class Board {
     void piece.offsetWidth;
     piece.classList.add('piece-arrive');
     piece.addEventListener('animationend', () => piece.classList.remove('piece-arrive'), { once: true });
-    if (this.lastMove.captured) {
-      const cap = this.squareEls[this.lastMove.from]?.querySelector('.piece-capture-ghost');
-      if (cap) cap.remove();
-    }
   }
 
   _bindEvents() {
@@ -195,8 +290,6 @@ export class Board {
   }
 
   _squareFromPoint(x, y) {
-    // Now that board is ordered correctly in DOM, we can use hit-testing directly.
-    // Find which square element contains the point.
     for (const [name, el] of Object.entries(this.squareEls)) {
       const rect = el.getBoundingClientRect();
       if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
@@ -207,7 +300,7 @@ export class Board {
   }
 
   _onPointerDown(ev) {
-    if (!this.interactive) return;
+    if (!this.interactive || this.animating) return;
     if (this.promotionPending) return;
     const pos = this._pointerPos(ev);
     const sqName = this._squareFromPoint(pos.x, pos.y);
@@ -301,7 +394,6 @@ export class Board {
 
   setPlayerColor(color) {
     this.playerColor = color;
-    // If orientation doesn't match player color, flip the board
     if (color && this.orientation !== color) {
       this.setOrientation(color);
     }
@@ -320,10 +412,10 @@ export class Board {
   }
 
   _dispatchMove(moveObj) {
-    this.onMove(moveObj);
+    const result = this.onMove(moveObj);
     this.selected = null;
     this.legalTargets = [];
-    this.render();
+    if (result === false) this.render();
   }
 
   _showPromotion(from, to, color) {
@@ -337,7 +429,7 @@ export class Board {
       const opt = document.createElement('div');
       opt.className = 'promo-option';
       const key = (color === 'w' ? 'w' : 'b') + p.toUpperCase();
-      opt.style.backgroundImage = `url("${PIECES[key]}")`;
+      opt.style.backgroundImage = `url("${this.pieces[key]}")`;
       opt.onclick = () => {
         picker.remove();
         this.promotionPending = null;
@@ -349,7 +441,6 @@ export class Board {
     const rect = sqEl.getBoundingClientRect();
     const boardRect = this.el.getBoundingClientRect();
     picker.style.left = (rect.left - boardRect.left) + 'px';
-    // Show below if promoting bottom pawn, above if top
     const isTopRow = (this.orientation === 'white' && color === 'w') ||
                      (this.orientation === 'black' && color === 'b');
     if (isTopRow) picker.style.top = (rect.top - boardRect.top) + 'px';
