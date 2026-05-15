@@ -2,51 +2,60 @@
 
 const { Chess } = require('chess.js');
 const { analyzer } = require('./stockfishAnalyzer');
-const { query, one } = require('./db/pool');
+const { query, one, many } = require('./db/pool');
 
 /**
- * Mischess Anti-Cheat v2
+ * Mischess Anti-Cheat v3
  *
- * Signal stack (strongest first):
- *   1. ACPL - average centipawn loss vs Stockfish best move
- *   2. Accuracy% - Lichess-style formula from win% deltas
- *   3. Rolling 6-game average of accuracy per user
- *   4. Move-time variance (coefficient of variation)
- *   5. Focus-loss events during rated games
- *   6. Instant-move ratio on complex positions
- *
- * Output: on evaluation completion, update users.recent_accuracies and
- * recent_acpls arrays. If averages cross thresholds, set is_flagged = true
- * and matchmaking shadow-pools them (see gameManager).
+ * Primary: Stockfish ACPL + Lichess-style accuracy + top-move correlation
+ * Secondary: move-time variance, focus/telemetry events from client
  */
 
 const ANALYSIS_DEPTH = parseInt(process.env.ANALYSIS_DEPTH || '12', 10);
-const ACCURACY_FLAG_THRESHOLD = 97;       // avg of last 6 > 97% = flagged
-const ACPL_FLAG_THRESHOLD = 10;           // avg of last 6 ACPL < 10 = flagged
-const MIN_GAMES_FOR_FLAG = 3;             // require at least 3 analyzed games
-const MIN_MOVES_FOR_ANALYSIS = 12;        // skip very short games
+const ACCURACY_FLAG_THRESHOLD = 96;
+const ACPL_FLAG_THRESHOLD = 11;
+const TOP_MOVE_MATCH_THRESHOLD = 0.82;
+const MIN_GAMES_FOR_FLAG = 3;
+const MIN_MOVES_FOR_ANALYSIS = 12;
 const ROLLING_WINDOW = 6;
+const OPENING_PLY_SKIP = 8;
+const FORCED_DELTA_CP = 60;
+const BEHAVIORAL_FLAG_SCORE = 55;
+const TELEMETRY_SEVERE_COUNT = 4;
 
-/**
- * Convert centipawn loss to Lichess-style win percentage delta.
- * Formula: winPct = 50 + 50 * (2 / (1 + e^(-0.00368208 * cp)) - 1)
- * Accuracy per move: 103.1668 * e^(-0.04354 * winPctDelta) - 3.1669 (clamped 0..100)
- */
 function winPct(cp) {
   const clamped = Math.max(-1000, Math.min(1000, cp));
   return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * clamped)) - 1);
 }
 
 function accuracyFromLoss(winPctBefore, winPctAfter) {
-  // If the move was from side-to-move perspective, winPctBefore should be >= winPctAfter
   const diff = Math.max(0, winPctBefore - winPctAfter);
   const acc = 103.1668 * Math.exp(-0.04354 * diff) - 3.1669;
   return Math.max(0, Math.min(100, acc));
 }
 
+function cpFromWinPct(wp) {
+  const clamped = Math.max(0.01, Math.min(99.99, wp));
+  const x = (clamped - 50) / 50;
+  const r = (1 - x) / (1 + x);
+  if (r <= 0) return 1000;
+  return Math.max(-1000, Math.min(1000, -Math.log(r) / 0.00368208));
+}
+
+function moveToUci(move) {
+  if (!move) return '';
+  return move.from + move.to + (move.promotion || '');
+}
+
+function classifyCpLoss(cpLoss) {
+  if (cpLoss >= 300) return 'blunder';
+  if (cpLoss >= 150) return 'mistake';
+  if (cpLoss >= 50) return 'inaccuracy';
+  return 'good';
+}
+
 /**
  * Analyze a completed game with Stockfish.
- * Returns { white: { acpl, accuracy, movesAnalyzed }, black: { ... } } or null.
  */
 async function analyzeGame(game) {
   if (!analyzer.available) return null;
@@ -61,38 +70,27 @@ async function analyzeGame(game) {
   const blackLosses = [];
   const whiteAccuracies = [];
   const blackAccuracies = [];
-
-  // Per-move data for analysis_moves table
+  const whiteTopMatches = [];
+  const blackTopMatches = [];
   const perMoveAnalysis = [];
 
-  // OPENING_PLY_SKIP: don't count first N plies for ACPL (book theory).
-  // Cheaters typically don't fire up the engine until they're out of book.
-  const OPENING_PLY_SKIP = 8;
-
-  // FORCED_THRESHOLD: if a move's eval delta is tiny (recapture, only-move),
-  // it doesn't tell us much about cheating. Weight it less.
-  const FORCED_DELTA_CP = 60;
-
-  // Evaluate starting position
-  let prevCp = await analyzer.evaluate(chess.fen(), ANALYSIS_DEPTH);
-  if (prevCp === null) return null;
-  let prevWinPctWhite = winPct(prevCp);
-  const sideToMove = () => chess.turn() === 'w' ? 'white' : 'black';
-
-  // Get the best move from current position (for comparison + analysis_moves)
-  let bestMove = null;
-  try {
-    bestMove = await analyzer.getBestMove(chess.fen(), ANALYSIS_DEPTH);
-  } catch {}
+  const startCp = await analyzer.evaluate(chess.fen(), ANALYSIS_DEPTH);
+  if (startCp === null) return null;
+  let prevWinPctWhite = winPct(startCp);
 
   for (let i = 0; i < moves.length; i++) {
     const san = moves[i];
-    const beforeSide = sideToMove();
+    const beforeSide = chess.turn() === 'w' ? 'white' : 'black';
     const fenBefore = chess.fen();
     const evalBefore = beforeSide === 'white' ? prevWinPctWhite : (100 - prevWinPctWhite);
 
+    const bestUci = await analyzer.getBestMove(fenBefore, ANALYSIS_DEPTH);
     const move = chess.move(san);
     if (!move) break;
+
+    const playedUci = moveToUci(move);
+    const matchedTop = bestUci && playedUci === bestUci;
+    const bestSan = bestUci ? uciToSan(fenBefore, bestUci) : null;
 
     const cpAfterRaw = await analyzer.evaluate(chess.fen(), ANALYSIS_DEPTH);
     if (cpAfterRaw === null) continue;
@@ -108,76 +106,232 @@ async function analyzeGame(game) {
     const afterCpMover = beforeSide === 'white' ? cpAfterWhite : -cpAfterWhite;
     const cpLoss = Math.max(0, Math.min(1000, prevCpMover - afterCpMover));
 
-    // Classify the move
-    let classification = 'good';
-    if (cpLoss >= 300) classification = 'blunder';
-    else if (cpLoss >= 150) classification = 'mistake';
-    else if (cpLoss >= 50) classification = 'inaccuracy';
-
     perMoveAnalysis.push({
       ply: i + 1,
       played_san: san,
-      best_move_san: (i === 0 && bestMove) ? bestMove : null,
+      best_move_san: bestSan,
       eval_before: evalBefore,
       eval_after: 100 - moverWinPctAfter,
-      classification,
+      classification: classifyCpLoss(cpLoss),
     });
 
-    // Weighted ACPL — skip opening book and weight near-forced moves less
     const isInOpening = i < OPENING_PLY_SKIP;
     if (!isInOpening) {
-      // Detect "forced" moves: positions where almost any move loses similar amount
-      // (heuristic: if cpLoss is small and starting eval is non-trivial)
       const wasForcedRecapture = move.captured && Math.abs(prevCpMover) < 100 && cpLoss < FORCED_DELTA_CP;
       const weight = wasForcedRecapture ? 0.3 : 1.0;
+      const weightedLoss = cpLoss * weight;
 
       if (beforeSide === 'white') {
-        for (let w = 0; w < weight; w += 1) whiteLosses.push(cpLoss);
-        if (weight === 1.0) whiteLosses.push(cpLoss);
+        whiteLosses.push(weightedLoss);
         whiteAccuracies.push(moveAccuracy);
+        if (bestUci) whiteTopMatches.push(matchedTop ? 1 : 0);
       } else {
-        for (let w = 0; w < weight; w += 1) blackLosses.push(cpLoss);
-        if (weight === 1.0) blackLosses.push(cpLoss);
+        blackLosses.push(weightedLoss);
         blackAccuracies.push(moveAccuracy);
+        if (bestUci) blackTopMatches.push(matchedTop ? 1 : 0);
       }
     }
 
     prevWinPctWhite = winPctAfterWhite;
-    bestMove = null; // only first-move best is shown for now
   }
 
   const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+  const topMatchRate = arr => arr.length ? avg(arr) : null;
 
   return {
     white: {
       acpl: +avg(whiteLosses).toFixed(1),
       accuracy: +avg(whiteAccuracies).toFixed(2),
       movesAnalyzed: whiteLosses.length,
+      topMoveMatch: topMatchRate(whiteTopMatches),
     },
     black: {
       acpl: +avg(blackLosses).toFixed(1),
       accuracy: +avg(blackAccuracies).toFixed(2),
       movesAnalyzed: blackLosses.length,
+      topMoveMatch: topMatchRate(blackTopMatches),
     },
     perMove: perMoveAnalysis,
   };
 }
 
-function cpFromWinPct(wp) {
-  // Inverse of winPct - approximate
-  const clamped = Math.max(0.01, Math.min(99.99, wp));
-  const x = (clamped - 50) / 50;
-  // 2 / (1 + e^(-0.00368208 * cp)) - 1 = x
-  // => 1 + e^(-0.00368208 * cp) = 2 / (x + 1)
-  // => e^(-0.00368208 * cp) = 2 / (x + 1) - 1 = (1 - x) / (1 + x)
-  const r = (1 - x) / (1 + x);
-  if (r <= 0) return 1000;
-  return Math.max(-1000, Math.min(1000, -Math.log(r) / 0.00368208));
+function uciToSan(fen, uci) {
+  try {
+    const c = new Chess(fen);
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const promotion = uci.length > 4 ? uci[4] : undefined;
+    const m = c.move({ from, to, promotion });
+    return m ? m.san : uci;
+  } catch {
+    return uci;
+  }
 }
 
-/**
- * Run analysis for a finished game, update user rolling windows, maybe flag.
- */
+function analyzeMoveTimes(moveTimes) {
+  if (moveTimes.length < 10) return { suspicious: false, score: 0, flags: [] };
+  const mean = moveTimes.reduce((a, b) => a + b, 0) / moveTimes.length;
+  const variance = moveTimes.reduce((acc, t) => acc + Math.pow(t - mean, 2), 0) / moveTimes.length;
+  const stdDev = Math.sqrt(variance);
+  const cv = stdDev / Math.max(1, mean);
+  const flags = [];
+  let score = 0;
+  if (cv < 0.22 && moveTimes.length > 20) { score += 40; flags.push('low_variance'); }
+  const instantMoves = moveTimes.filter(t => t < 400).length;
+  if (instantMoves / moveTimes.length > 0.65 && moveTimes.length > 15) { score += 30; flags.push('excessive_instant'); }
+  const veryFast = moveTimes.filter(t => t < 200).length;
+  if (veryFast / moveTimes.length > 0.4 && moveTimes.length > 12) { score += 20; flags.push('sub_200ms_moves'); }
+  return { suspicious: score >= 40, score, flags, mean: Math.round(mean), stdDev: Math.round(stdDev), cv: +cv.toFixed(3) };
+}
+
+function analyzeFocusEvents(focusEvents, moveCount) {
+  if (!focusEvents?.length) return { suspicious: false, score: 0, flags: [] };
+  const flags = [];
+  let score = 0;
+
+  const blurs = focusEvents.filter(e =>
+    e.event_type === 'blur' || e.event_type === 'window_blur' || e.type === 'blur'
+  ).length;
+  const telemetry = focusEvents.filter(e => String(e.event_type || '').startsWith('ac:'));
+  const severe = telemetry.filter(e => {
+    const t = e.event_type.replace(/^ac:/, '');
+    return ['devtools_open', 'paste_during_game', 'multi_tab_game', 'zero_mouse_drift'].includes(t);
+  }).length;
+
+  score += Math.min(35, blurs * 4);
+  score += Math.min(45, severe * 12);
+
+  if (blurs > moveCount / 3) flags.push('frequent_tab_switching');
+  if (blurs > 15) flags.push('excessive_focus_loss');
+  if (severe >= 2) flags.push('client_telemetry');
+  if (severe >= TELEMETRY_SEVERE_COUNT) flags.push('severe_client_signals');
+
+  return { suspicious: score >= 30, score, flags, blurCount: blurs, telemetryCount: severe };
+}
+
+async function loadBehavioralSignals(gameId, userId) {
+  const times = await many(
+    `SELECT think_ms FROM move_telemetry WHERE game_id = $1 AND user_id = $2 ORDER BY ply`,
+    [gameId, userId]
+  );
+  const events = await many(
+    `SELECT event_type FROM focus_events WHERE game_id = $1 AND user_id = $2`,
+    [gameId, userId]
+  );
+  return {
+    moveTimes: times.map(r => r.think_ms),
+    focusEvents: events,
+  };
+}
+
+function buildFlagReasons({ avgAcc, avgAcpl, topMatch, behavioral, accuracyOnly }) {
+  const reasons = [];
+  if (accuracyOnly || avgAcc >= ACCURACY_FLAG_THRESHOLD) reasons.push(`avg_accuracy=${avgAcc.toFixed(2)}%`);
+  if (accuracyOnly || avgAcpl <= ACPL_FLAG_THRESHOLD) reasons.push(`avg_acpl=${avgAcpl.toFixed(2)}`);
+  if (topMatch != null && topMatch >= TOP_MOVE_MATCH_THRESHOLD) reasons.push(`top_move_match=${(topMatch * 100).toFixed(1)}%`);
+  if (behavioral?.suspicious) reasons.push(`behavioral=${behavioral.flags.join(',')}`);
+  return reasons;
+}
+
+function shouldFlag({ accs, acpls, topMatches, behavioral, gameStats }) {
+  if (accs.length < MIN_GAMES_FOR_FLAG) return { flag: false, reasons: [] };
+
+  const avgAcc = accs.reduce((a, b) => a + b, 0) / accs.length;
+  const avgAcpl = acpls.reduce((a, b) => a + b, 0) / acpls.length;
+  const avgTopMatch = topMatches.length
+    ? topMatches.reduce((a, b) => a + b, 0) / topMatches.length
+    : null;
+
+  const accuracySuspicious = avgAcc >= ACCURACY_FLAG_THRESHOLD || avgAcpl <= ACPL_FLAG_THRESHOLD;
+  const engineCorrelation = avgTopMatch != null && avgTopMatch >= TOP_MOVE_MATCH_THRESHOLD
+    && avgAcc >= 92;
+  const behavioralStrong = behavioral?.score >= BEHAVIORAL_FLAG_SCORE;
+  const singleGameEngine = gameStats?.topMoveMatch >= TOP_MOVE_MATCH_THRESHOLD
+    && gameStats?.accuracy >= 97
+    && gameStats?.movesAnalyzed >= 20;
+
+  const flag = accuracySuspicious
+    || engineCorrelation
+    || (behavioralStrong && (avgAcc >= 93 || avgAcpl <= 14))
+    || (singleGameEngine && behavioral?.score >= 35);
+
+  const reasons = buildFlagReasons({
+    avgAcc,
+    avgAcpl,
+    topMatch: avgTopMatch,
+    behavioral,
+    accuracyOnly: accuracySuspicious,
+  });
+
+  return { flag, reasons, avgAcc, avgAcpl, avgTopMatch };
+}
+
+async function pushAndEvaluate(userId, accuracy, acpl, topMoveMatch, gameId) {
+  const row = await one(
+    `UPDATE users SET
+       recent_accuracies = (ARRAY_APPEND(recent_accuracies, $1::numeric))[GREATEST(1, array_length(recent_accuracies,1) + 1 - $4)::int : ],
+       recent_acpls = (ARRAY_APPEND(recent_acpls, $2::numeric))[GREATEST(1, array_length(recent_acpls,1) + 1 - $4)::int : ]
+     WHERE id = $5
+     RETURNING id, is_flagged, recent_accuracies, recent_acpls`,
+    [accuracy, acpl, ROLLING_WINDOW, userId]
+  );
+  if (!row || row.is_flagged) return;
+
+  const accs = (row.recent_accuracies || []).slice(-ROLLING_WINDOW).map(Number);
+  const acpls = (row.recent_acpls || []).slice(-ROLLING_WINDOW).map(Number);
+
+  if ((row.recent_accuracies || []).length > ROLLING_WINDOW) {
+    await query(
+      `UPDATE users SET recent_accuracies = $1::numeric[], recent_acpls = $2::numeric[] WHERE id = $3`,
+      [accs, acpls, userId]
+    );
+  }
+
+  const { moveTimes, focusEvents } = await loadBehavioralSignals(gameId, userId);
+  const timing = analyzeMoveTimes(moveTimes);
+  const focus = analyzeFocusEvents(focusEvents, moveTimes.length);
+  const behavioral = {
+    suspicious: timing.suspicious || focus.suspicious,
+    score: timing.score + focus.score,
+    flags: [...timing.flags, ...focus.flags],
+  };
+
+  const { flag, reasons, avgAcc, avgAcpl } = shouldFlag({
+    accs,
+    acpls,
+    topMatches: topMoveMatch != null ? [topMoveMatch] : [],
+    behavioral,
+    gameStats: { accuracy, acpl, topMoveMatch, movesAnalyzed: moveTimes.length },
+  });
+
+  if (!flag || reasons.length === 0) return;
+
+  await query(
+    `UPDATE users SET is_flagged = true, flag_reason = $1, flagged_at = NOW() WHERE id = $2`,
+    [reasons.join(';'), userId]
+  );
+  await query(
+    `INSERT INTO anticheat_reports (user_id, game_id, reason, severity, details, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
+    [
+      userId,
+      gameId,
+      'accuracy_pulse_v3',
+      Math.min(100, 70 + behavioral.score),
+      JSON.stringify({
+        avgAccuracy: avgAcc,
+        avgAcpl,
+        topMoveMatch,
+        behavioral,
+        timing,
+        focus,
+        window: accs.length,
+      }),
+    ]
+  );
+  console.log(`[anticheat] flagged user ${userId}: ${reasons.join(';')}`);
+}
+
 async function runAnalysisForGame(gameId) {
   const game = await one('SELECT * FROM games WHERE id = $1 AND analyzed = false', [gameId]);
   if (!game) return;
@@ -194,7 +348,6 @@ async function runAnalysisForGame(gameId) {
   }
 
   if (!result) {
-    // No Stockfish available or game too short. Mark analyzed anyway to skip next time.
     await query('UPDATE games SET analyzed = true WHERE id = $1', [gameId]);
     return;
   }
@@ -204,12 +357,9 @@ async function runAnalysisForGame(gameId) {
     [result.white.acpl, result.white.accuracy, result.black.acpl, result.black.accuracy, gameId]
   );
 
-  // Persist per-move analysis for the analysis page
-  if (result.perMove && result.perMove.length > 0) {
+  if (result.perMove?.length) {
     try {
-      // Clear any existing partial analysis
       await query('DELETE FROM analysis_moves WHERE game_id = $1', [gameId]);
-      // Bulk insert
       for (const m of result.perMove) {
         await query(
           `INSERT INTO analysis_moves (game_id, ply, played_san, best_move_san, eval_before, eval_after, classification)
@@ -223,97 +373,13 @@ async function runAnalysisForGame(gameId) {
     }
   }
 
-  // Update rolling window for each player
   if (game.white_id) {
-    await pushAndEvaluate(game.white_id, result.white.accuracy, result.white.acpl, gameId);
+    await pushAndEvaluate(game.white_id, result.white.accuracy, result.white.acpl, result.white.topMoveMatch, gameId);
   }
   if (game.black_id) {
-    await pushAndEvaluate(game.black_id, result.black.accuracy, result.black.acpl, gameId);
+    await pushAndEvaluate(game.black_id, result.black.accuracy, result.black.acpl, result.black.topMoveMatch, gameId);
   }
 }
-
-async function pushAndEvaluate(userId, accuracy, acpl, gameId) {
-  // Append accuracy/acpl, trim to ROLLING_WINDOW
-  const row = await one(
-    `UPDATE users SET
-       recent_accuracies = (ARRAY_APPEND(recent_accuracies, $1::numeric))[GREATEST(1, array_length(recent_accuracies,1) + 1 - $3)::int : ],
-       recent_acpls = (ARRAY_APPEND(recent_acpls, $2::numeric))[GREATEST(1, array_length(recent_acpls,1) + 1 - $3)::int : ]
-     WHERE id = $4
-     RETURNING id, is_flagged, recent_accuracies, recent_acpls`,
-    [accuracy, acpl, ROLLING_WINDOW, userId]
-  );
-  if (!row) return;
-
-  // trim arrays to last N in JS too (Postgres slice is inclusive; our expression above keeps the last N-ish elements but simpler approach below)
-  const accs = (row.recent_accuracies || []).slice(-ROLLING_WINDOW).map(Number);
-  const acpls = (row.recent_acpls || []).slice(-ROLLING_WINDOW).map(Number);
-
-  // If DB slice didn't truncate cleanly, force it
-  if ((row.recent_accuracies || []).length > ROLLING_WINDOW) {
-    await query(
-      `UPDATE users SET recent_accuracies = $1::numeric[], recent_acpls = $2::numeric[] WHERE id = $3`,
-      [accs, acpls, userId]
-    );
-  }
-
-  // Only flag once we have enough data
-  if (accs.length < MIN_GAMES_FOR_FLAG) return;
-  if (row.is_flagged) return; // already flagged
-
-  const avgAcc = accs.reduce((a, b) => a + b, 0) / accs.length;
-  const avgAcpl = acpls.reduce((a, b) => a + b, 0) / acpls.length;
-
-  const reasons = [];
-  if (avgAcc >= ACCURACY_FLAG_THRESHOLD) reasons.push(`avg_accuracy=${avgAcc.toFixed(2)}%`);
-  if (avgAcpl <= ACPL_FLAG_THRESHOLD) reasons.push(`avg_acpl=${avgAcpl.toFixed(2)}`);
-
-  if (reasons.length > 0) {
-    await query(
-      `UPDATE users SET is_flagged = true, flag_reason = $1, flagged_at = NOW() WHERE id = $2`,
-      [reasons.join(';'), userId]
-    );
-    await query(
-      `INSERT INTO anticheat_reports (user_id, game_id, reason, severity, details, created_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
-      [
-        userId,
-        gameId,
-        'accuracy_pulse',
-        95,
-        JSON.stringify({ avgAccuracy: avgAcc, avgAcpl: avgAcpl, window: accs.length }),
-      ]
-    );
-    console.log(`[anticheat] flagged user ${userId}: ${reasons.join(';')}`);
-  }
-}
-
-// ---------- Heuristic signals (kept as secondary layer) ----------
-
-function analyzeMoveTimes(moveTimes) {
-  if (moveTimes.length < 10) return { suspicious: false, score: 0, flags: [] };
-  const mean = moveTimes.reduce((a, b) => a + b, 0) / moveTimes.length;
-  const variance = moveTimes.reduce((acc, t) => acc + Math.pow(t - mean, 2), 0) / moveTimes.length;
-  const stdDev = Math.sqrt(variance);
-  const cv = stdDev / Math.max(1, mean);
-  const flags = [];
-  let score = 0;
-  if (cv < 0.25 && moveTimes.length > 20) { score += 35; flags.push('low_variance'); }
-  const instantMoves = moveTimes.filter(t => t < 500).length;
-  if (instantMoves / moveTimes.length > 0.7 && moveTimes.length > 15) { score += 25; flags.push('excessive_instant'); }
-  return { suspicious: score >= 40, score, flags, mean: Math.round(mean), stdDev: Math.round(stdDev), cv: +cv.toFixed(3) };
-}
-
-function analyzeFocusEvents(focusEvents, moveCount) {
-  if (!focusEvents?.length) return { suspicious: false, score: 0, flags: [] };
-  const blurs = focusEvents.filter(e => e.event_type === 'blur' || e.type === 'blur').length;
-  const flags = [];
-  let score = Math.min(50, blurs * 5);
-  if (blurs > moveCount / 3) flags.push('frequent_tab_switching');
-  if (blurs > 20) flags.push('excessive_focus_loss');
-  return { suspicious: score >= 30, score, flags, blurCount: blurs };
-}
-
-// ---------- Analysis queue ----------
 
 let queueRunning = false;
 async function processQueue() {
@@ -336,15 +402,12 @@ async function processQueue() {
 }
 
 function startAnalysisQueue() {
-  // Poll every 15 seconds for new games to analyze.
   setInterval(processQueue, 15000);
-  // Also kick immediately after boot
   setTimeout(processQueue, 5000);
-  console.log('[anticheat] analysis queue started');
+  console.log('[anticheat] analysis queue started (v3)');
 }
 
 function enqueueAnalysis(gameId) {
-  // Just nudge the queue; actual work happens on interval or next kick
   setImmediate(processQueue);
 }
 

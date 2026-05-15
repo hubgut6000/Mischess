@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { query, many, one } = require('../db/pool');
 const { authMiddleware } = require('../auth');
 const { shareIp } = require('../ipTrack');
+const { notifyUser } = require('../ws');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -220,6 +221,7 @@ router.post('/messages/:username', messageLimiter, async (req, res) => {
      VALUES ($1, $2, $3) RETURNING id, created_at`,
     [req.user.id, other.id, body]
   );
+  notifyUser(other.id, { type: 'newMessage', from: req.user.username });
   res.json({ ok: true, message: { id: row.id, body, created_at: row.created_at, from_id: req.user.id, to_id: other.id } });
 });
 
@@ -270,6 +272,14 @@ router.post('/challenges', async (req, res) => {
      RETURNING id`,
     [req.user.id, target.id, time, inc, !!rated, validColor]
   );
+  notifyUser(target.id, {
+    type: 'challengeReceived',
+    from: req.user.username,
+    challengeId: row.id,
+    initialTime: time,
+    increment: inc,
+    rated: !!rated,
+  });
   res.json({ ok: true, id: row.id });
 });
 
@@ -316,6 +326,11 @@ router.post('/challenges/:id/accept', async (req, res) => {
     `UPDATE challenges SET status = 'accepted', responded_at = NOW() WHERE id = $1`,
     [ch.id]
   );
+  notifyUser(ch.from_id, {
+    type: 'challengeAccepted',
+    username: req.user.username,
+    challengeId: ch.id,
+  });
   res.json({ ok: true, challenge: ch });
 });
 

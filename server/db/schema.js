@@ -192,6 +192,10 @@ CREATE TABLE IF NOT EXISTS restrictions (
 
 CREATE INDEX IF NOT EXISTS idx_restrictions_user ON restrictions(user_id, active);
 
+-- One active restriction per kind per user (fixes duplicate no_rated rows)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_restrictions_user_kind_active
+  ON restrictions (user_id, kind) WHERE active = true;
+
 -- Recent quick resigns (for resignation farming detection)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS recent_quick_resigns INTEGER NOT NULL DEFAULT 0;
 

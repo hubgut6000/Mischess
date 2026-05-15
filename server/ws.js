@@ -345,4 +345,13 @@ function clampInt(v, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-module.exports = { initWebSocket };
+/**
+ * Push a realtime notification to all sockets for a user (challenges, DMs, etc.).
+ */
+function notifyUser(userId, msg) {
+  const sockets = userSockets.get(userId);
+  if (!sockets) return;
+  for (const ws of sockets) send(ws, msg);
+}
+
+module.exports = { initWebSocket, notifyUser };

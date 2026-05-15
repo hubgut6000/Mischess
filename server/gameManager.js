@@ -281,11 +281,16 @@ class GameSession {
           );
           const count = updated?.recent_quick_resigns || 0;
           if (count >= 5) {
-            // Restrict from rated play for 24 hours
             await query(
-              `INSERT INTO restrictions (user_id, kind, reason, expires_at)
-               VALUES ($1, 'no_rated', $2, NOW() + INTERVAL '24 hours')
-               ON CONFLICT DO NOTHING`,
+              `UPDATE restrictions SET active = false
+               WHERE user_id = $1 AND kind = 'no_rated' AND active = true`,
+              [loserId]
+            );
+            await query(
+              `INSERT INTO restrictions (user_id, kind, reason, expires_at, active)
+               VALUES ($1, 'no_rated', $2, NOW() + INTERVAL '24 hours', true)
+               ON CONFLICT (user_id, kind) WHERE active = true
+               DO UPDATE SET reason = EXCLUDED.reason, expires_at = EXCLUDED.expires_at, active = true`,
               [loserId, `Repeated quick resignations (${count} in a row)`]
             );
             console.log(`[behavioral] User ${loserId} restricted: ${count} quick resigns`);

@@ -1906,10 +1906,153 @@ input::placeholder, textarea::placeholder { color: var(--ink-4); }
   color: var(--ink-1);
 }
 .restriction-banner .title { font-weight: 700; color: var(--negative); margin-bottom: 4px; }
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
+
+/* -- Home v4: lichess-style landing ------------------------- */
+
+.home-split {
+  display: grid;
+  grid-template-columns: 1fr minmax(280px, 420px);
+  gap: 48px;
+  align-items: center;
+  padding: 48px 0 32px;
+}
+@media (max-width: 900px) {
+  .home-split { grid-template-columns: 1fr; text-align: center; }
+  .home-split .home-hero-actions { justify-content: center; }
+}
+
+.home-live-bar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 40px;
+}
+.live-stat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  font-size: 0.88rem;
+  color: var(--ink-2);
+}
+.live-stat strong { color: var(--ink-1); font-family: var(--font-mono); }
+.live-stat .pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--positive);
+  box-shadow: 0 0 8px var(--positive);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.home-quick-play {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 32px 0 0;
+  max-width: 520px;
+}
+@media (max-width: 900px) {
+  .home-quick-play { margin-left: auto; margin-right: auto; }
+}
+@media (max-width: 520px) {
+  .home-quick-play { grid-template-columns: repeat(2, 1fr); }
+}
+.quick-tc {
+  padding: 16px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-m);
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.22s var(--ease);
+  text-decoration: none;
+  color: inherit;
+}
+.quick-tc:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-2);
+  color: var(--ink-1);
+}
+.quick-tc .time { font-family: var(--font-serif); font-size: 1.35rem; font-weight: 600; color: var(--ink-1); }
+.quick-tc .cat { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-3); margin-top: 4px; }
+
+.home-recent-games {
+  margin-top: 80px;
+}
+.home-recent-games h2 { margin-bottom: 20px; }
+.recent-game-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-m);
+  margin-bottom: 8px;
+  transition: border-color 0.2s var(--ease);
+}
+.recent-game-row:hover { border-color: var(--line); }
+.recent-game-row .players { font-weight: 500; color: var(--ink-1); }
+.recent-game-row .meta { font-size: 0.82rem; color: var(--ink-3); font-family: var(--font-mono); }
+
+/* Play page quick bar */
+.play-quick-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 28px;
+}
+.play-quick-bar .quick-tc { padding: 12px 8px; }
+
+/* Fair play / prose pages */
+.page-prose { max-width: 760px; margin: 0 auto; }
+.fairplay-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin: 32px 0;
+}
+.fairplay-card {
+  padding: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-l);
+}
+.fairplay-card h3 { margin-bottom: 8px; font-size: 1.15rem; }
+.fairplay-card p { margin: 0; font-size: 0.92rem; }
+.fairplay-card .badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent-faint);
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.cheat-warning {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(520px, 92vw);
+}
+.cheat-warning svg { flex-shrink: 0; opacity: 0.9; }
+
+/* Board polish */
+.chess-board {
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  box-shadow: var(--shadow-3), 0 0 0 1px var(--board-frame);
 }
 
 /* -- Update banner ----------------------------------------- */

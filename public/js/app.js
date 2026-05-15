@@ -54,6 +54,25 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+function showCheatWarning(message) {
+  const mount = $('#cheat-warning-mount');
+  if (!mount) return;
+  mount.innerHTML = '';
+  const banner = h('div', { class: 'cheat-warning', role: 'alert' },
+    h('svg', { width: '20', height: '20', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'aria-hidden': 'true' },
+      h('path', { d: 'M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z' }),
+    ),
+    h('span', {}, message),
+  );
+  mount.appendChild(banner);
+  setTimeout(() => { if (mount.contains(banner)) banner.remove(); }, 8000);
+}
+
+const SUSPICIOUS_TELEMETRY = new Set([
+  'devtools_open', 'devtools_shortcut', 'paste_during_game',
+  'multi_tab_game', 'zero_mouse_drift',
+]);
+
 function toast(msg, type = 'info') {
   const container = $('#toast-container');
   const t = h('div', { class: `toast ${type}` }, msg);
@@ -319,23 +338,56 @@ function onWsMessage(ev) {
 route('/', async () => {
   const view = h('div');
 
-  // Hero
+  let liveCount = 0;
+  let recentGames = [];
+  try {
+    const live = await fetch('/api/games/live').then(r => r.json());
+    liveCount = (live.games || []).length;
+  } catch {}
+  try {
+    const recent = await fetch('/api/games/recent').then(r => r.json());
+    recentGames = (recent.games || []).slice(0, 6);
+  } catch {}
+
+  view.appendChild(h('div', { class: 'home-live-bar' },
+    h('div', { class: 'live-stat' },
+      h('span', { class: 'pulse-dot' }),
+      h('span', {}, h('strong', {}, String(liveCount)), ' games live now'),
+    ),
+    h('div', { class: 'live-stat' },
+      h('span', {}, 'Stockfish-powered ', h('strong', {}, 'fair play')),
+    ),
+    h('div', { class: 'live-stat' },
+      h('span', {}, 'No ads · ', h('strong', {}, 'free forever')),
+    ),
+  ));
+
   const hero = h('section', { class: 'home-hero' },
     h('span', { class: 'kicker' }, 'Free forever. No ads. Ever.'),
-    h('h1', {}, 'Chess, ', h('span', { class: 'ital' }, 'slowly.')),
+    h('h1', {}, 'Play chess ', h('span', { class: 'ital' }, 'the right way.')),
     h('p', { class: 'lead' },
-      "A cozy place to play serious chess. Fair matchmaking, honest anti-cheat, and room to breathe."),
+      'Real-time rated games, deep post-game analysis, and anti-cheat that actually works — without the clutter of commercial chess sites.'),
     h('div', { class: 'home-hero-actions' },
       h('a', { href: state.user ? '#/play' : '#/register', 'data-link': '', class: 'btn btn-primary btn-lg' },
-        state.user ? 'Play now' : 'Get started'),
-      h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-outline btn-lg' }, 'Play vs AI'),
+        state.user ? 'Play online' : 'Create free account'),
+      h('a', { href: '#/play/ai', 'data-link': '', class: 'btn btn-outline btn-lg' }, 'Play computer'),
+      h('a', { href: '#/watch', 'data-link': '', class: 'btn btn-ghost btn-lg' }, 'Watch live'),
+    ),
+    h('div', { class: 'home-quick-play' },
+      ...[
+        { label: '1+0', cat: 'Bullet' },
+        { label: '3+2', cat: 'Blitz' },
+        { label: '10+0', cat: 'Rapid' },
+        { label: '30+0', cat: 'Classical' },
+      ].map(tc => h('a', { href: '#/play', 'data-link': '', class: 'quick-tc' },
+        h('div', { class: 'time' }, tc.label),
+        h('div', { class: 'cat' }, tc.cat),
+      )),
     ),
   );
-  view.appendChild(hero);
 
-  // Animated board
   const previewWrap = h('div', { class: 'home-board-preview', id: 'home-board-wrap' });
-  view.appendChild(previewWrap);
+  view.appendChild(h('div', { class: 'home-split' }, hero, previewWrap));
 
   // 3-up features
   view.appendChild(h('section', { class: 'home-features' },
@@ -369,7 +421,22 @@ route('/', async () => {
     ),
   ));
 
-  // Manifesto
+  if (recentGames.length) {
+    const recentSec = h('section', { class: 'home-recent-games' });
+    recentSec.appendChild(h('h2', {}, 'Recent games'));
+    for (const g of recentGames) {
+      recentSec.appendChild(h('a', {
+        href: `#/game/${g.id}`,
+        'data-link': '',
+        class: 'recent-game-row',
+      },
+        h('span', { class: 'players' }, `${g.white_name} vs ${g.black_name}`),
+        h('span', { class: 'meta' }, `${g.time_control || g.category} · ${g.result || '—'}`),
+      ));
+    }
+    view.appendChild(recentSec);
+  }
+
   view.appendChild(h('section', { class: 'home-manifesto' },
     h('div', { class: 'text' },
       "Most chess sites treat you like a product. We're building the one that treats you like a player.",
@@ -520,6 +587,25 @@ function renderPlayPicker() {
   ];
   let selected = TC[3];
   let rated = true;
+
+  const quickBar = h('div', { class: 'play-quick-bar' });
+  [TC[0], TC[3], TC[6], TC[8]].forEach(tc => {
+    quickBar.appendChild(h('button', {
+      type: 'button',
+      class: 'quick-tc',
+      onclick: () => {
+        selected = tc;
+        $$('.tc-card', grid).forEach(c => c.classList.remove('selected'));
+        const match = $$(`.tc-card`, grid).find(c => c.querySelector('.tc-time')?.textContent === tc.label);
+        if (match) match.classList.add('selected');
+        sound.click();
+      },
+    },
+      h('div', { class: 'time' }, tc.label),
+      h('div', { class: 'cat' }, tc.cat),
+    ));
+  });
+  view.appendChild(quickBar);
 
   const grid = h('div', { class: 'tc-grid' });
   TC.forEach(tc => {
@@ -2045,8 +2131,8 @@ function renderGamePage(game) {
     interactive: isPlayer,
     onMove: (move) => {
       if (!isPlayer) return false;
+      if (state.telemetry) state.telemetry.onBeforeMove();
       sendWs({ type: 'move', move });
-      // Optimistic update handled on move echo
     },
   });
   state.board = board;
@@ -2101,7 +2187,12 @@ function onGameStart(game, yourColor) {
   state.lastFen = game.fen;
   // Activate anti-cheat telemetry for this game
   if (yourColor && !state.telemetry) {
-    state.telemetry = new AntiCheatTelemetry((msg) => sendWs(msg));
+    state.telemetry = new AntiCheatTelemetry((msg) => {
+      sendWs(msg);
+      if (state.game?.rated && SUSPICIOUS_TELEMETRY.has(msg.event)) {
+        showCheatWarning('Fair play: suspicious activity was logged during this rated game.');
+      }
+    });
   }
   if (state.telemetry && yourColor) {
     state.telemetry.activate(game.id);
@@ -2413,21 +2504,37 @@ route('/about', async () => {
 
 // FAIRPLAY
 route('/fairplay', async () => {
-  const view = h('div', { style: 'max-width:720px;margin:0 auto' });
+  const view = h('div', { class: 'page-prose' });
+  view.appendChild(h('span', { class: 'kicker' }, 'Integrity'));
   view.appendChild(h('h1', {}, 'Fair Play'));
-  view.appendChild(h('p', {}, 'Mischess runs a multi-layer anti-cheat system designed to catch engine assistance without punishing honest players.'));
+  view.appendChild(h('p', { class: 'lead' },
+    'Mischess runs a multi-layer anti-cheat stack inspired by Lichess — Stockfish analysis, behavioral signals, and shadow-pool matchmaking.'));
 
-  view.appendChild(h('h3', {}, 'Accuracy Pulse'));
-  view.appendChild(h('p', {}, 'After every rated game, Stockfish evaluates each of your moves against its own best move. We compute Average Centipawn Loss (ACPL) and move-by-move accuracy, then store the last 6 games as a rolling average. Consistent engine-level play pushes both metrics into unreachable territory for humans — and triggers the flag.'));
-
-  view.appendChild(h('h3', {}, 'Secondary signals'));
-  view.appendChild(h('p', {}, 'Move-time variance (engines produce unnaturally uniform timings), instant-move ratio on complex positions, tab-switch and focus-loss events during rated games, and IP clustering across accounts. These alone are weak evidence; combined with ACPL they strengthen the signal.'));
-
-  view.appendChild(h('h3', {}, 'Shadow-pool matchmaking'));
-  view.appendChild(h('p', {}, 'When an account is flagged, nothing visible changes for that user. They still queue, still get matched, still see ratings change — but they only ever match against other flagged accounts. Cheaters play each other; honest players are untouched. No public shame, no appeals circus, no one-shot mistakes.'));
+  view.appendChild(h('div', { class: 'fairplay-grid' },
+    h('div', { class: 'fairplay-card' },
+      h('span', { class: 'badge' }, 'Primary'),
+      h('h3', {}, 'Accuracy Pulse'),
+      h('p', {}, 'Every rated game is analyzed move-by-move. We track ACPL, Lichess-style accuracy, and how often you play the engine\'s top move. Sustained superhuman performance across your last 6 games triggers review.'),
+    ),
+    h('div', { class: 'fairplay-card' },
+      h('span', { class: 'badge' }, 'Behavioral'),
+      h('h3', {}, 'Timing & focus'),
+      h('p', {}, 'Unnaturally uniform move times, instant moves in complex positions, tab switches, devtools, paste events, and multi-tab play are logged and combined with engine signals.'),
+    ),
+    h('div', { class: 'fairplay-card' },
+      h('span', { class: 'badge' }, 'Matchmaking'),
+      h('h3', {}, 'Shadow pool'),
+      h('p', {}, 'Flagged accounts still play rated chess — but only against each other. Honest players never match them. No public shaming, no ruined games.'),
+    ),
+    h('div', { class: 'fairplay-card' },
+      h('span', { class: 'badge' }, 'Boosting'),
+      h('h3', {}, 'Anti-farming'),
+      h('p', {}, 'IP clustering blocks rated games on the same network. Repeat-opponent limits and quick-resign restrictions curb rating manipulation.'),
+    ),
+  ));
 
   view.appendChild(h('h3', {}, 'How to stay clean'));
-  view.appendChild(h('p', {}, 'Play your own moves. Don\'t switch tabs during rated games. If you use analysis tools, use them outside of games, not during.'));
+  view.appendChild(h('p', {}, 'Play your own moves. Keep one tab open during rated games. Use analysis tools only outside of live games.'));
   return view;
 });
 

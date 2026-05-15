@@ -112,10 +112,11 @@ class StockfishAnalyzer {
   async evaluate(fen, depth = 12) {
     if (!this.available) return null;
     return this._runExclusive(async () => {
-      this._send('position fen ' + fen);
-      this._send(`go depth ${depth}`);
       let lastCp = 0;
       let lastMate = null;
+      let bestMove = null;
+      this._send('position fen ' + fen);
+      this._send(`go depth ${depth}`);
       const handler = (line) => {
         if (line.startsWith('info ')) {
           const cp = line.match(/score cp (-?\d+)/);
@@ -123,20 +124,49 @@ class StockfishAnalyzer {
           if (cp) { lastCp = parseInt(cp[1], 10); lastMate = null; }
           if (mate) { lastMate = parseInt(mate[1], 10); lastCp = null; }
         }
+        if (line.startsWith('bestmove ')) {
+          const parts = line.split(/\s+/);
+          if (parts[1] && parts[1] !== '(none)') bestMove = parts[1];
+        }
       };
       this._addHandler(handler);
       try {
-        await this._waitFor(l => l.startsWith('bestmove'), 15000);
-      } catch (e) {
+        await this._waitFor(l => l.startsWith('bestmove'), 20000);
+      } catch {
         this._removeHandler(handler);
         return null;
       }
       this._removeHandler(handler);
-      if (lastMate !== null) {
-        // Convert mate score to a large centipawn value (positive if side to move mates)
-        return lastMate > 0 ? 10000 : -10000;
-      }
+      void bestMove;
+      if (lastMate !== null) return lastMate > 0 ? 10000 : -10000;
       return lastCp;
+    });
+  }
+
+  /**
+   * Best move in UCI format (e.g. e2e4, e7e8q). Null if unavailable.
+   */
+  async getBestMove(fen, depth = 12) {
+    if (!this.available) return null;
+    return this._runExclusive(async () => {
+      this._send('position fen ' + fen);
+      this._send(`go depth ${depth}`);
+      let bestMove = null;
+      const handler = (line) => {
+        if (line.startsWith('bestmove ')) {
+          const parts = line.split(/\s+/);
+          if (parts[1] && parts[1] !== '(none)') bestMove = parts[1];
+        }
+      };
+      this._addHandler(handler);
+      try {
+        await this._waitFor(l => l.startsWith('bestmove'), 20000);
+      } catch {
+        this._removeHandler(handler);
+        return null;
+      }
+      this._removeHandler(handler);
+      return bestMove;
     });
   }
 
