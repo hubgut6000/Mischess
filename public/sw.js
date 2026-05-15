@@ -12,7 +12,7 @@
  *  - The new SW installs in the background; clients are notified via postMessage
  */
 
-const VERSION = 'v7';
+const VERSION = 'v8';
 const STATIC_CACHE = `mischess-static-${VERSION}`;
 const HTML_CACHE = `mischess-html-${VERSION}`;
 

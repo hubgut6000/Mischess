@@ -3,6 +3,14 @@ import { findBestMove } from './ai.js';
 import { sound, installClickSounds } from './sound.js';
 import { StockfishEngine } from './stockfish.js';
 import { AntiCheatTelemetry } from './anticheat.js';
+import {
+  generateHumanOpponent,
+  computeHumanThinkTime,
+  engineMoveTime,
+  thinkingLabel,
+  categoryFromTime,
+  sleep,
+} from './humanAi.js';
 
 // ---------- State ----------
 const state = {
@@ -16,6 +24,7 @@ const state = {
   playerColor: null,
   focusBlurListener: null,
   stockfish: null,     // persistent engine instance
+  queueSeek: null,       // active matchmaking + ghost fallback timer
   settings: loadSettings(),
   lastFen: null,       // to detect move type (capture/check) for sound
 };
@@ -736,6 +745,11 @@ function renderPlayPicker() {
 
 async function startSeek(initialTime, increment, rated) {
   await ensureWs();
+  clearQueueSeek();
+  const cat = categoryFromTime(initialTime, increment);
+  const rating = state.user ? (state.user[`rating_${cat}`] || 1500) : 1500;
+  state.queueSeek = { initialTime, increment, rated, rating, category: cat, timerId: null };
+
   sendWs({ type: 'seekGame', initialTime, increment, rated });
   sound.startSearch();
   const status = $('#queue-status');
@@ -745,22 +759,71 @@ async function startSeek(initialTime, increment, rated) {
       h('div', { class: 'status-text' },
         h('span', { class: 'dot' }),
         `Searching for opponent · ${initialTime/60}+${increment} · ${rated ? 'rated' : 'casual'}`),
+      h('p', { class: 'queue-hint', style: 'font-size:0.85rem;color:var(--ink-3);margin:12px 0 0' },
+        'We\'ll find a similarly rated player — or pair you quickly if the queue is quiet.'),
       h('button', { class: 'btn btn-outline btn-sm', onclick: cancelSeek }, 'Cancel'),
     ));
   }
 }
 
+const GHOST_QUEUE_MS = 10_000;
+
+function clearQueueSeek() {
+  if (state.queueSeek?.timerId) clearTimeout(state.queueSeek.timerId);
+  state.queueSeek = null;
+}
+
 function cancelSeek() {
+  clearQueueSeek();
   sendWs({ type: 'cancelSeek' });
   sound.stopSearch();
 }
 
-function onQueued() { /* already shown */ }
+function onQueued() {
+  if (!state.queueSeek) return;
+  if (state.queueSeek.timerId) clearTimeout(state.queueSeek.timerId);
+  state.queueSeek.timerId = setTimeout(() => {
+    if (state.queueSeek && !state.game) startGhostMatch();
+  }, GHOST_QUEUE_MS);
+}
+
 function onQueueCancelled() {
+  clearQueueSeek();
   sound.stopSearch();
   const status = $('#queue-status');
   if (status) status.innerHTML = '';
   toast('Search cancelled');
+}
+
+/** After 10s in queue: casual game vs human-like bot at player's Elo. */
+async function startGhostMatch() {
+  const q = state.queueSeek;
+  if (!q || state.game) return;
+  clearQueueSeek();
+  sendWs({ type: 'cancelSeek' });
+  sound.stopSearch();
+
+  const status = $('#queue-status');
+  if (status) status.innerHTML = '';
+
+  const opponent = generateHumanOpponent(q.rating);
+  const playerColor = Math.random() < 0.5 ? 'white' : 'black';
+  const preset = {
+    label: opponent.username,
+    elo: opponent.elo,
+    skill: opponent.skill,
+    depth: opponent.depth,
+  };
+
+  await sleep(400 + Math.random() * 600);
+  toast(`Matched with ${opponent.username} (${opponent.rating})`, 'success');
+  sound.matchFound();
+
+  await startAiGame(preset, playerColor, {
+    opponent,
+    isGhost: true,
+    ghostNote: 'casual',
+  });
 }
 
 // PLAY vs AI
@@ -768,8 +831,8 @@ route('/play/ai', async () => {
   const view = h('div', { class: 'play-layout' });
   view.appendChild(h('h1', {}, 'Play vs Computer'));
   view.appendChild(h('p', {},
-    'Practice against Stockfish. Pick a target Elo or a classic skill level. ',
-    'Ratings are not affected. Engine runs in a background thread, UI stays smooth.'));
+    'Practice against an opponent with human-like think times at your chosen strength. ',
+    'Ratings are not affected.'));
 
   // Elo presets — map to Stockfish Skill Level and search depth
   const PRESETS = [
@@ -820,22 +883,19 @@ route('/play/ai', async () => {
   return view;
 });
 
-async function startAiGame(preset, playerColor) {
-  // Check if Chess.js loaded
+async function startAiGame(preset, playerColor, opts = {}) {
   if (!window.Chess) {
     toast('Chess library not loaded - refresh the page', 'error');
-    console.error('window.Chess is undefined');
     return;
   }
 
-  // Initialize Stockfish engine (persistent across games if possible)
   if (!state.stockfish) {
     state.stockfish = new StockfishEngine();
-    toast('Loading Stockfish engine...', 'info');
+    if (!opts.isGhost) toast('Loading engine...', 'info');
   }
   try {
     await state.stockfish.init();
-    if (state.stockfish.useFallback) {
+    if (state.stockfish.useFallback && !opts.isGhost) {
       toast('Using fallback AI (Stockfish unavailable)', 'info');
     }
   } catch (e) {
@@ -846,12 +906,24 @@ async function startAiGame(preset, playerColor) {
   state.stockfish.setSkillLevel(preset.skill);
   state.stockfish.setElo(preset.elo);
 
+  const opponent = opts.opponent || {
+    username: `Stockfish (${preset.label})`,
+    rating: preset.elo,
+    elo: preset.elo,
+    skill: preset.skill,
+    depth: preset.depth,
+  };
+
   const aiGame = {
     preset,
     playerColor,
+    opponent,
+    isGhost: !!opts.isGhost,
+    isBot: true,
     chess: new window.Chess(),
     history: [],
     thinking: false,
+    lastMove: null,
   };
   renderAiGameView(aiGame);
 }
@@ -864,10 +936,13 @@ function renderAiGameView(aiGame) {
 
   const oppStrip = h('div', { class: 'player-strip' },
     h('div', { class: 'player-info' },
-      h('span', { class: 'name' }, `Stockfish (${aiGame.preset.label})`),
-      h('span', { class: 'rating' }, `${aiGame.preset.elo}`),
+      h('div', { class: 'avatar' }, ((aiGame.opponent?.username || aiGame.preset.label || '?')[0]).toUpperCase()),
+      h('div', { class: 'name-block' },
+        h('div', { class: 'name' }, aiGame.opponent?.username || `Stockfish (${aiGame.preset.label})`),
+        h('div', { class: 'rating' }, String(aiGame.opponent?.rating ?? aiGame.preset.elo)),
+      ),
     ),
-    h('div', { class: 'clock', id: 'ai-thinking' }, 'ready'),
+    h('div', { class: 'clock', id: 'ai-thinking' }, aiGame.isGhost ? 'online' : 'ready'),
   );
   const meStrip = h('div', { class: 'player-strip' },
     h('div', { class: 'player-info' },
@@ -888,7 +963,7 @@ function renderAiGameView(aiGame) {
       if (confirm('Resign?')) endAiGame(aiGame, aiGame.playerColor === 'white' ? '0-1' : '1-0', 'resignation');
     }}, 'Resign'),
     h('button', { class: 'btn btn-ghost btn-sm', onclick: () => {
-      if (aiGame.thinking) return toast('Wait for Stockfish to finish', 'error');
+      if (aiGame.thinking) return toast('Wait for your opponent to move', 'error');
       if (aiGame.chess.isGameOver()) return;
       if (aiGame.history.length < 2) return;
       const target = aiGame.history.slice(0, -2);
@@ -913,6 +988,7 @@ function renderAiGameView(aiGame) {
       if (aiGame.thinking) return false;
       const res = aiGame.chess.move(move);
       if (!res) return false;
+      aiGame.lastMove = res;
       aiGame.history.push(res.san);
       // Play move sound
       if (state.settings.moveSound) {
@@ -945,31 +1021,42 @@ async function requestAiMove(aiGame, board, moveList) {
   if (aiGame.chess.isGameOver()) return;
   aiGame.thinking = true;
   const ind = $('#ai-thinking');
-  if (ind) { ind.textContent = 'thinking...'; ind.classList.add('active'); }
+  const oppStrip = $('#ai-opp-strip');
+  const ply = aiGame.chess.history().length;
+  const elo = aiGame.opponent?.elo ?? aiGame.preset.elo;
+
+  if (ind) {
+    ind.textContent = thinkingLabel(elo, ply);
+    ind.classList.add('active');
+  }
+  if (oppStrip) oppStrip.classList.add('active-turn');
 
   try {
-    const engine = state.stockfish;
-    const moveUci = await engine.getBestMove(aiGame.chess.fen(), {
-      depth: aiGame.preset.depth,
-      movetime: Math.min(3000, aiGame.preset.depth * 200),
+    const thinkMs = computeHumanThinkTime(aiGame.chess, {
+      elo,
+      ply,
+      lastMove: aiGame.lastMove,
     });
+    const movetime = engineMoveTime(elo, ply);
+    const engine = state.stockfish;
 
-    if (!moveUci) {
-      aiGame.thinking = false;
-      if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
-      return;
-    }
+    const [moveUci] = await Promise.all([
+      engine.getBestMove(aiGame.chess.fen(), {
+        depth: aiGame.preset.depth,
+        movetime,
+      }),
+      sleep(thinkMs),
+    ]);
 
-    // Convert UCI (e.g. e2e4 or e7e8q) to move object
+    if (!moveUci) return;
+
     const from = moveUci.slice(0, 2);
     const to = moveUci.slice(2, 4);
     const promotion = moveUci.length >= 5 ? moveUci[4] : undefined;
     const res = aiGame.chess.move({ from, to, promotion });
-    if (!res) {
-      aiGame.thinking = false;
-      if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
-      return;
-    }
+    if (!res) return;
+
+    aiGame.lastMove = res;
     aiGame.history.push(res.san);
     if (state.settings.moveSound) {
       if (res.captured) sound.capture();
@@ -977,15 +1064,19 @@ async function requestAiMove(aiGame, board, moveList) {
       if (aiGame.chess.inCheck()) setTimeout(() => sound.check(), 120);
     }
     board.setPosition(aiGame.chess.fen());
-    board.setLastMove(res.from, res.to);
+    board.setLastMove(res.from, res.to, { captured: !!res.captured });
     renderMoveList(moveList, aiGame.chess.fen(), aiGame.history);
     checkAiGameEnd(aiGame);
   } catch (e) {
     console.error(e);
-    toast('Engine error', 'error');
+    if (!aiGame.isGhost) toast('Engine error', 'error');
   } finally {
     aiGame.thinking = false;
-    if (ind) { ind.textContent = 'ready'; ind.classList.remove('active'); }
+    if (ind) {
+      ind.textContent = aiGame.isGhost ? 'online' : 'ready';
+      ind.classList.remove('active');
+    }
+    if (oppStrip) oppStrip.classList.remove('active-turn');
   }
 }
 
@@ -1011,7 +1102,8 @@ function endAiGame(aiGame, result, termination) {
     if (youWon) sound.victory();
     else sound.gameEnd();
   }
-  showGameEndModal(`${msg} — ${termination}`, () => navigate('#/play/ai'));
+  const back = aiGame.isGhost ? '#/play' : '#/play/ai';
+  showGameEndModal(`${msg} — ${termination}`, () => navigate(back));
 }
 
 function renderMoveList(el, fen, history) {
@@ -2258,6 +2350,7 @@ function updateClockDisplays() {
 }
 
 function onGameStart(game, yourColor) {
+  clearQueueSeek();
   sound.stopSearch();
   sound.matchFound();
   state.game = game;
